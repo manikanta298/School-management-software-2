@@ -1564,3 +1564,350 @@ BEGIN
   END IF;
   RETURN NEW;
 END; $$;
+
+-- ============================================================================
+-- 025_exams_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for grading scales, exams, candidates, papers, marks and audit history.
+-- Migration 018 assigned existing exam records (including the default grading scale) to the initial school.
+-- Depends on 023 (enrollments_id_school_unique); guarded so it also applies if 023 is absent.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enrollments_id_school_unique') THEN
+    ALTER TABLE enrollments ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+  END IF;
+END $$;
+
+ALTER TABLE exam_grading_scales
+  ADD CONSTRAINT exam_grading_scales_id_school_unique UNIQUE (id, school_id);
+DROP INDEX IF EXISTS exam_grading_scales_name_unique;
+CREATE UNIQUE INDEX exam_grading_scales_school_name_unique ON exam_grading_scales(school_id, lower(name));
+
+ALTER TABLE exam_grade_bands
+  ADD CONSTRAINT exam_grade_bands_scale_same_school_fk
+    FOREIGN KEY (scale_id, school_id) REFERENCES exam_grading_scales(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exams
+  ADD CONSTRAINT exams_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exams_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_term_same_school_fk
+    FOREIGN KEY (term_id, school_id) REFERENCES terms(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_scale_same_school_fk
+    FOREIGN KEY (grading_scale_id, school_id) REFERENCES exam_grading_scales(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_candidates
+  ADD CONSTRAINT exam_candidates_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_section_same_school_fk
+    FOREIGN KEY (section_id, school_id) REFERENCES sections(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_papers
+  ADD CONSTRAINT exam_papers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exam_papers_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_papers_subject_same_school_fk
+    FOREIGN KEY (subject_id, school_id) REFERENCES subjects(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_marks
+  ADD CONSTRAINT exam_marks_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exam_marks_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_marks_paper_same_school_fk
+    FOREIGN KEY (paper_id, school_id) REFERENCES exam_papers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_marks_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_mark_audit
+  ADD CONSTRAINT exam_mark_audit_mark_same_school_fk
+    FOREIGN KEY (mark_id, school_id) REFERENCES exam_marks(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_events
+  ADD CONSTRAINT exam_events_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX exams_school_class_year_idx ON exams(school_id, class_id, academic_year_id);
+CREATE INDEX exam_candidates_school_exam_idx ON exam_candidates(school_id, exam_id, student_id);
+CREATE INDEX exam_papers_school_exam_idx ON exam_papers(school_id, exam_id);
+CREATE INDEX exam_marks_school_exam_student_idx ON exam_marks(school_id, exam_id, student_id);
+CREATE INDEX exam_mark_audit_school_mark_idx ON exam_mark_audit(school_id, mark_id, id);
+CREATE INDEX exam_events_school_exam_idx ON exam_events(school_id, exam_id, id);
+
+-- Audit triggers must write the owning school on every audit row.
+CREATE OR REPLACE FUNCTION audit_exam_mark() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO exam_mark_audit(school_id,mark_id,new_outcome,new_score,new_remark,changed_by)
+  VALUES(NEW.school_id,NEW.id,NEW.outcome,NEW.score,NEW.remark,NEW.updated_by);
+ ELSIF (NEW.outcome,NEW.score,NEW.remark) IS DISTINCT FROM (OLD.outcome,OLD.score,OLD.remark) THEN
+  INSERT INTO exam_mark_audit(school_id,mark_id,previous_outcome,previous_score,previous_remark,new_outcome,new_score,new_remark,reason,changed_by)
+  VALUES(NEW.school_id,NEW.id,OLD.outcome,OLD.score,OLD.remark,NEW.outcome,NEW.score,NEW.remark,NEW.change_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+CREATE OR REPLACE FUNCTION audit_exam_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO exam_events(school_id,exam_id,action,actor_id) VALUES(NEW.school_id,NEW.id,'created',NEW.created_by);
+ ELSE
+  INSERT INTO exam_events(school_id,exam_id,action,reason,actor_id)
+  VALUES(NEW.school_id,NEW.id,CASE NEW.status WHEN 'published' THEN 'published' WHEN 'cancelled' THEN 'cancelled' ELSE 'reopened' END,NEW.action_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 026_audit_triggers_school_id.sql
+-- ============================================================================
+-- Timetable audit rows must carry the slot's school_id (NOT NULL since tenant migration).
+CREATE OR REPLACE FUNCTION audit_timetable_slot() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event text;
+BEGIN
+ IF TG_OP='INSERT' THEN event='created';INSERT INTO timetable_audit(school_id,slot_id,action,new_values,actor_id,note) VALUES(NEW.school_id,NEW.id,event,to_jsonb(NEW),NEW.changed_by,NEW.change_note);
+ ELSE event=CASE WHEN OLD.assignment_id IS NOT NULL AND NEW.assignment_id IS NULL THEN 'detached' WHEN OLD.active AND NOT NEW.active THEN 'deactivated' WHEN NOT OLD.active AND NEW.active THEN 'reactivated' ELSE 'updated' END;INSERT INTO timetable_audit(school_id,slot_id,action,previous_values,new_values,actor_id,note) VALUES(NEW.school_id,NEW.id,event,to_jsonb(OLD),to_jsonb(NEW),NEW.changed_by,NEW.change_note);END IF;RETURN NEW;
+END; $$;
+
+-- Notice audit rows must carry the notice's school_id as well.
+CREATE OR REPLACE FUNCTION audit_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE action_name text;
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO notice_audit(school_id,notice_id,action,new_values,actor_id) VALUES(NEW.school_id,NEW.id,'created',to_jsonb(NEW),NEW.created_by);
+ ELSE action_name=CASE WHEN NEW.status=OLD.status THEN 'updated' WHEN NEW.status='published' THEN 'published' WHEN NEW.status='archived' THEN 'archived' WHEN OLD.status='archived' THEN 'restored' ELSE 'unpublished' END;INSERT INTO notice_audit(school_id,notice_id,action,previous_values,new_values,actor_id,reason) VALUES(NEW.school_id,NEW.id,action_name,to_jsonb(OLD),to_jsonb(NEW),NEW.updated_by,NEW.action_reason);END IF;RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 027_session_management_login_history.sql
+-- ============================================================================
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent text, ADD COLUMN IF NOT EXISTS ip text;
+CREATE TABLE IF NOT EXISTS login_events (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+ email text,
+ success boolean NOT NULL,
+ reason text,
+ ip text,
+ user_agent text,
+ school_id uuid REFERENCES schools(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS login_events_user_created_idx ON login_events(user_id,created_at DESC);
+
+-- ============================================================================
+-- 028_per_school_numbering.sql
+-- ============================================================================
+-- Per-school, gap-free invoice and receipt numbers. The counter row is updated inside the inserting transaction,
+-- so a rollback (including a rejected overpayment) also rolls the counter back and no number is skipped.
+CREATE TABLE school_counters (
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ name text NOT NULL CHECK (name IN ('invoice','receipt')),
+ next_value bigint NOT NULL CHECK (next_value >= 1),
+ PRIMARY KEY (school_id, name)
+);
+INSERT INTO school_counters(school_id,name,next_value) SELECT school_id,'invoice',max(invoice_number)+1 FROM fee_invoices GROUP BY school_id;
+INSERT INTO school_counters(school_id,name,next_value) SELECT school_id,'receipt',max(receipt_number)+1 FROM fee_payments GROUP BY school_id;
+ALTER TABLE fee_invoices ALTER COLUMN invoice_number DROP IDENTITY;
+ALTER TABLE fee_payments ALTER COLUMN receipt_number DROP IDENTITY;
+ALTER TABLE fee_invoices DROP CONSTRAINT IF EXISTS fee_invoices_invoice_number_key;
+ALTER TABLE fee_payments DROP CONSTRAINT IF EXISTS fee_payments_receipt_number_key;
+ALTER TABLE fee_invoices ADD CONSTRAINT fee_invoices_school_number_key UNIQUE (school_id, invoice_number);
+ALTER TABLE fee_payments ADD CONSTRAINT fee_payments_school_number_key UNIQUE (school_id, receipt_number);
+CREATE FUNCTION next_school_number(p_school uuid, p_name text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE v bigint;
+BEGIN
+ INSERT INTO school_counters(school_id,name,next_value) VALUES(p_school,p_name,2)
+ ON CONFLICT (school_id,name) DO UPDATE SET next_value=school_counters.next_value+1
+ RETURNING next_value-1 INTO v;
+ RETURN v;
+END; $$;
+CREATE FUNCTION assign_invoice_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.invoice_number := next_school_number(NEW.school_id,'invoice'); RETURN NEW; END; $$;
+CREATE FUNCTION assign_receipt_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.receipt_number := next_school_number(NEW.school_id,'receipt'); RETURN NEW; END; $$;
+CREATE TRIGGER fee_invoices_number BEFORE INSERT ON fee_invoices FOR EACH ROW EXECUTE FUNCTION assign_invoice_number();
+CREATE TRIGGER fee_payments_number BEFORE INSERT ON fee_payments FOR EACH ROW EXECUTE FUNCTION assign_receipt_number();
+
+-- ============================================================================
+-- 029_must_change_password.sql
+-- ============================================================================
+ALTER TABLE users ADD COLUMN must_change_password boolean NOT NULL DEFAULT false;
+
+-- ============================================================================
+-- 030_staff_roles.sql
+-- ============================================================================
+-- Adds Principal, Accountant, Receptionist, Librarian and Transport Manager roles.
+ALTER TABLE users DROP CONSTRAINT users_role_check;
+ALTER TABLE users ALTER COLUMN role TYPE varchar(20);
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','principal','accountant','receptionist','librarian','transport_manager','teacher','student','parent'));
+ALTER TABLE school_memberships DROP CONSTRAINT school_memberships_role_check;
+ALTER TABLE school_memberships ALTER COLUMN role TYPE varchar(20);
+ALTER TABLE school_memberships ADD CONSTRAINT school_memberships_role_check CHECK (role IN ('admin','principal','accountant','receptionist','librarian','transport_manager','teacher','student','parent'));
+
+-- ============================================================================
+-- 031_school_profiles.sql
+-- ============================================================================
+-- Per-school public profile: display name, address, contact details, principal name, and an optional logo
+-- stored as bytea (decision D1: small files in PostgreSQL, ≤512 KiB, MIME and size checked at the API boundary).
+CREATE TABLE school_profiles (
+ school_id uuid PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
+ display_name varchar(120) NOT NULL CHECK(length(trim(display_name)) BETWEEN 1 AND 120),
+ address varchar(500),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ email varchar(254) CHECK(email IS NULL OR email = lower(email)),
+ principal_name varchar(100) CHECK(principal_name IS NULL OR length(trim(principal_name)) BETWEEN 1 AND 100),
+ letterhead_text varchar(500),
+ logo_mime varchar(64) CHECK(logo_mime IS NULL OR logo_mime IN ('image/png','image/jpeg')),
+ logo_bytea bytea CHECK(logo_bytea IS NULL OR octet_length(logo_bytea) <= 524288),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ updated_by uuid REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ============================================================================
+-- 032_fees_carryover.sql
+-- ============================================================================
+-- Fees carry-over (BATCH_1_HANDOFF.md §2.1). fee_invoices.amount_minor stays snapshot-protected; concessions,
+-- instalments, penalties and refunds live in their own tables so the invoice row remains immutable.
+-- Balance = invoice.amount_minor - concessions - payments + penalties + refunds. The existing guard_fee_payment
+-- trigger is replaced so a payment is rejected only when it would exceed this balance. Concessions and refunds
+-- are also guarded so they cannot bring the effective outstanding amount below zero.
+
+CREATE TABLE fee_concessions (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ approved_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ approved_at timestamptz NOT NULL DEFAULT now(),
+ voided_at timestamptz,
+ voided_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+ void_reason varchar(200),
+ CHECK((voided_at IS NULL AND voided_by IS NULL AND void_reason IS NULL) OR
+       (voided_at IS NOT NULL AND voided_by IS NOT NULL AND void_reason IS NOT NULL AND length(trim(void_reason)) >= 3))
+);
+CREATE INDEX fee_concessions_invoice_idx ON fee_concessions(invoice_id, voided_at);
+
+CREATE TABLE fee_instalments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE CASCADE,
+ due_on date NOT NULL,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ position integer NOT NULL DEFAULT 0,
+ UNIQUE(invoice_id, due_on)
+);
+CREATE INDEX fee_instalments_invoice_idx ON fee_instalments(invoice_id, position);
+
+CREATE TABLE fee_penalties (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ rule varchar(40) NOT NULL CHECK(rule IN ('late_flat','late_percentage','manual')),
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ applied_on date NOT NULL CHECK(applied_on <= CURRENT_DATE),
+ applied_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ reason varchar(200),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX fee_penalties_invoice_idx ON fee_penalties(invoice_id);
+
+CREATE TABLE fee_refunds (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ payment_id uuid NOT NULL REFERENCES fee_payments(id) ON DELETE RESTRICT,
+ refund_number bigint NOT NULL,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ refunded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ refunded_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(invoice_id, payment_id),
+ FOREIGN KEY(payment_id, invoice_id) REFERENCES fee_payments(id, invoice_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX fee_refunds_school_number_key ON fee_refunds(school_id, refund_number);
+CREATE INDEX fee_refunds_payment_idx ON fee_refunds(payment_id);
+
+-- Extend school_counters to also cover the refund series. The certificate series is added in 034.
+ALTER TABLE school_counters DROP CONSTRAINT school_counters_name_check;
+ALTER TABLE school_counters ADD CONSTRAINT school_counters_name_check CHECK(name IN ('invoice','receipt','refund'));
+INSERT INTO school_counters(school_id,name,next_value) SELECT id,'refund',1 FROM schools WHERE NOT EXISTS (SELECT 1 FROM school_counters c WHERE c.school_id=schools.id AND c.name='refund');
+
+-- Replace the payment guard so it accounts for concessions, penalties and refunds. The invoice row is still locked.
+CREATE OR REPLACE FUNCTION guard_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE inv fee_invoices; paid bigint; concessions bigint; penalties bigint; refunds bigint; outstanding bigint;
+BEGIN
+ SELECT * INTO inv FROM fee_invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF inv.id IS NULL THEN RAISE EXCEPTION 'Invoice not found' USING ERRCODE='23503'; END IF;
+ IF TG_OP='UPDATE' THEN
+  IF (NEW.id,NEW.receipt_number,NEW.invoice_id,NEW.amount_minor,NEW.paid_on,NEW.method,NEW.reference,NEW.idempotency_key,NEW.recorded_by,NEW.recorded_at) IS DISTINCT FROM (OLD.id,OLD.receipt_number,NEW.invoice_id,OLD.amount_minor,OLD.paid_on,OLD.method,OLD.reference,OLD.idempotency_key,NEW.recorded_by,NEW.recorded_at) OR OLD.reversed_at IS NOT NULL OR NEW.reversed_at IS NULL THEN
+   RAISE EXCEPTION 'Payments can only be reversed once' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO paid FROM fee_payments WHERE invoice_id=NEW.invoice_id AND reversed_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO concessions FROM fee_concessions WHERE invoice_id=NEW.invoice_id AND voided_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO penalties FROM fee_penalties WHERE invoice_id=NEW.invoice_id;
+ SELECT coalesce(sum(amount_minor),0) INTO refunds FROM fee_refunds WHERE invoice_id=NEW.invoice_id;
+ outstanding := inv.amount_minor - concessions - paid + penalties - refunds;
+ IF inv.voided_at IS NOT NULL OR NEW.paid_on<inv.issued_on OR NEW.amount_minor>outstanding OR NEW.reversed_at IS NOT NULL THEN
+  RAISE EXCEPTION 'Invalid payment date, void invoice or overpayment' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+-- Concessions cannot bring the effective outstanding amount below zero (no negative balance).
+CREATE FUNCTION guard_fee_concession() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE inv fee_invoices; paid bigint; concessions bigint; penalties bigint; refunds bigint; outstanding bigint;
+BEGIN
+ SELECT * INTO inv FROM fee_invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF inv.id IS NULL THEN RAISE EXCEPTION 'Invoice not found' USING ERRCODE='23503'; END IF;
+ IF inv.voided_at IS NOT NULL THEN RAISE EXCEPTION 'Cannot add a concession to a void invoice' USING ERRCODE='23514'; END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO paid FROM fee_payments WHERE invoice_id=NEW.invoice_id AND reversed_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO concessions FROM fee_concessions WHERE invoice_id=NEW.invoice_id AND voided_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO penalties FROM fee_penalties WHERE invoice_id=NEW.invoice_id;
+ SELECT coalesce(sum(amount_minor),0) INTO refunds FROM fee_refunds WHERE invoice_id=NEW.invoice_id;
+ outstanding := inv.amount_minor - concessions - paid + penalties - refunds;
+ IF NEW.amount_minor > outstanding THEN RAISE EXCEPTION 'Concession exceeds outstanding amount' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_concessions_guard BEFORE INSERT OR UPDATE ON fee_concessions FOR EACH ROW EXECUTE FUNCTION guard_fee_concession();
+
+-- Refunds cannot exceed the parent payment's reversible amount.
+CREATE FUNCTION guard_fee_refund() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE pay fee_payments; already_refunded bigint;
+BEGIN
+ SELECT * INTO pay FROM fee_payments WHERE id=NEW.payment_id AND invoice_id=NEW.invoice_id FOR UPDATE;
+ IF pay.id IS NULL THEN RAISE EXCEPTION 'Payment not found' USING ERRCODE='23503'; END IF;
+ IF pay.reversed_at IS NOT NULL THEN RAISE EXCEPTION 'Cannot refund a reversed payment' USING ERRCODE='23514'; END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO already_refunded FROM fee_refunds WHERE payment_id=NEW.payment_id AND id<>NEW.id;
+ IF NEW.amount_minor > pay.amount_minor - already_refunded THEN RAISE EXCEPTION 'Refund exceeds reversible amount of the payment' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_refunds_guard BEFORE INSERT OR UPDATE ON fee_refunds FOR EACH ROW EXECUTE FUNCTION guard_fee_refund();
+
+-- Assign refund numbers from the per-school series.
+CREATE FUNCTION assign_refund_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.refund_number := next_school_number(NEW.school_id,'refund'); RETURN NEW; END; $$;
+CREATE TRIGGER fee_refunds_number BEFORE INSERT ON fee_refunds FOR EACH ROW EXECUTE FUNCTION assign_refund_number();
+
+-- Extend the fee_events kind vocabulary so concessions, penalties and refunds are auditable alongside invoices and payments.
+-- The original CHECK constraints in migration 006 were inline; column-level checks are auto-named fee_events_kind_check,
+-- table-level checks are auto-named fee_events_check (presence) and fee_events_check1 (reason). Drop them by name.
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_kind_check;
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_check;
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_check1;
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_kind_check CHECK(kind IN ('invoice_issued','invoice_voided','payment_recorded','payment_reversed','concession_recorded','concession_voided','penalty_applied','refund_issued'));
+ALTER TABLE fee_events ALTER COLUMN payment_id DROP NOT NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS concession_id uuid REFERENCES fee_concessions(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS penalty_id uuid REFERENCES fee_penalties(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS refund_id uuid REFERENCES fee_refunds(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_payment_presence_check CHECK(
+ (kind IN ('payment_recorded','payment_reversed','refund_issued')) = (payment_id IS NOT NULL)
+);
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_reason_required_check CHECK(
+ kind NOT IN ('invoice_voided','payment_reversed','concession_voided','refund_issued') OR (reason IS NOT NULL AND length(trim(reason)) >= 3)
+);
