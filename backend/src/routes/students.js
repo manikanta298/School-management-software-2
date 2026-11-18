@@ -6,6 +6,8 @@ import * as v from '../validators/students.js';
 import * as c from '../controllers/students.js';
 import * as exchange from '../services/studentExchange.js';
 import * as imports from '../services/studentImport.js';
+import * as docs from '../models/notifications.js';
+import * as nv from '../validators/notifications.js';
 export const studentsRouter=Router(),parentsRouter=Router();
 const admin=authorize('admin');
 const page=(req,res,next)=>{const parsed=v.listQuery.safeParse(req.query);if(!parsed.success)return res.status(400).json({message:'Invalid query'});req.directoryQuery=parsed.data;next();};
@@ -22,6 +24,9 @@ studentsRouter.post('/promote',admin,validate(v.promote),async(req,res)=>res.jso
 studentsRouter.post('/bulk-update',admin,validate(v.bulkUpdate),async(req,res)=>res.json(await exchange.bulkUpdate(req.schoolId,req.body)));
 studentsRouter.post('/import',admin,validate(imports.importBody),async(req,res,next)=>{try{res.json(await imports.import_(req.schoolId,req.user.id,req.body));}catch(e){next(e);}});
 studentsRouter.get('/:id/profile',async(req,res,next)=>{try{res.json({item:await imports.profile(req.user,req.schoolId,req.params.id)});}catch(e){next(e);}});
+// §2.2 student documents (P1)
+studentsRouter.get('/:id/documents',async(req,res,next)=>{try{res.json({items:await docs.list(req.schoolId,req.params.id)});}catch(e){next(e);}});
+studentsRouter.post('/:id/documents',admin,validate(nv.documentBody),async(req,res,next)=>{try{const buf=Buffer.from(req.body.data,'base64');if(buf.length>524288)throw Object.assign(new Error('Document too large'),{status:400});res.status(201).json({item:await docs.add(req.schoolId,req.params.id,req.user.id,req.body.name,req.body.mime,buf)});}catch(e){next(e);}});
 studentsRouter.get('/:id/parents',page,c.links);
 studentsRouter.post('/:id/parents',admin,validate(v.link),c.addLink);
 studentsRouter.delete('/:id/parents/:parentId',admin,c.removeLink);

@@ -3,6 +3,7 @@ import {api} from '../api/client';
 import {allPages} from '../api/pagination';
 import {formatMoney,parseMoney,moneyInput} from '../api/money';
 import FeeInvoice from './FeeInvoice';
+import FeesCarryOver from '../components/FeesCarryOver';
 import FeeReports from './FeeReports';
 import FeeInvoiceCreator from './FeeInvoiceCreator';
 export default function Fees({user}){
@@ -25,5 +26,6 @@ export default function Fees({user}){
  {mode==='reports'&&admin&&<FeeReports/>}
  {mode==='structures'&&admin&&<div className="grid"><div className="card"><h2>{editing?'Edit':'Create'} fee structure</h2><form onSubmit={saveStructure}><label>Class and year<select required value={draft.class_id||''} onChange={e=>setDraft({...draft,class_id:e.target.value})}><option value="">Select class</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name} · {yearName(c.academic_year_id)}</option>)}</select></label><label>Name<input required maxLength={100} value={draft.name||''} onChange={e=>setDraft({...draft,name:e.target.value})}/></label><label>Amount<input required inputMode="decimal" value={draft.amount||''} onChange={e=>setDraft({...draft,amount:e.target.value})}/></label><label>Currency<select value={draft.currency} onChange={e=>setDraft({...draft,currency:e.target.value})}>{['INR','USD','EUR','GBP'].map(c=><option key={c}>{c}</option>)}</select></label><label>Category<select value={draft.category||'miscellaneous'} onChange={e=>setDraft({...draft,category:e.target.value})}>{['admission','tuition','term','examination','transport','books','uniform','activity','miscellaneous'].map(c=><option key={c}>{c}</option>)}</select></label><label>Active<input className="check" type="checkbox" checked={draft.active} onChange={e=>setDraft({...draft,active:e.target.checked})}/></label><button disabled={busy}>Save structure</button> {editing&&<button type="button" onClick={()=>{setEditing(null);setDraft({currency:'INR',active:true});}}>Cancel edit</button>}</form></div><div><h2>Fee structures</h2>{!structures.length&&<p>No fee structures yet.</p>}{structures.map(f=><article className="card" key={f.id}><h3>{f.name}</h3><p>{f.class_name} · {f.academic_year_name} · {f.active?'Active':'Inactive'}</p><p>{formatMoney(f.amount_minor,f.currency)}</p><button disabled={busy} onClick={()=>{setEditing(f.id);setDraft({class_id:f.class_id,name:f.name,amount:moneyInput(f.amount_minor),currency:f.currency,active:f.active,category:f.category});}}>Edit structure</button></article>)}</div></div>}
  </>}
+ {mode==='invoices'&&admin&&selected&&<FeesCarryOver invoice={items.find(i=>i.id===selected)} user={user}/>}
  </section>;
 }

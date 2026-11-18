@@ -3,6 +3,7 @@ import {api} from '../api/client';
 import {allPages} from '../api/pagination';
 import AttendanceRegister from './AttendanceRegister';
 import AttendanceReport from './AttendanceReport';
+import AttendanceExtensions from '../components/AttendanceExtensions';
 const day=value=>String(value).slice(0,10);
 function dateFor(section,today){const end=day(section.end_date);return end<today?end:today;}
 function rangeFor(section,date){const month=date.slice(0,8)+'01',start=day(section?.start_date||month);return {from:start>month&&start<=date?start:month,to:date};}
@@ -24,5 +25,6 @@ export default function Attendance({user}){
  {mode==='register'&&selected&&<><label>Attendance date<input type="date" value={date} min={day(selected.start_date)} max={day(selected.end_date)<today?day(selected.end_date):today} disabled={dirty} onChange={e=>setDate(e.target.value)}/></label>{date>=day(selected.start_date)&&date<=day(selected.end_date)&&date<=today?<AttendanceRegister key={sectionId+date} section={selected} date={date} user={user} onDirty={setDirty}/>:<p>Select a date within this academic year on or before today. Future years are not open for marking.</p>}</>}
  {mode!=='register'&&((mode==='history'&&studentId)||(mode==='summary'&&selected))&&<><form className="range-form" onSubmit={e=>{e.preventDefault();setApplied({...range});}}><label>From<input type="date" required value={range.from} onChange={e=>setRange({...range,from:e.target.value})}/></label><label>To<input type="date" required min={range.from} value={range.to} onChange={e=>setRange({...range,to:e.target.value})}/></label><button>Apply date range</button><p>Choose up to 366 inclusive days.</p></form>{applied&&<AttendanceReport key={mode+sectionId+studentId+applied.from+applied.to} sectionId={mode==='summary'?sectionId:null} studentId={mode==='history'?studentId:null} range={applied}/>}</>}
  </>}
+ {staff&&<AttendanceExtensions user={user}/>}
  </section>;
 }

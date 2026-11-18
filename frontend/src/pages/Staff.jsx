@@ -1,5 +1,6 @@
 import React,{useEffect,useState} from 'react';
 import {api} from '../api/client';
+import StaffExtensions from '../components/StaffExtensions';
 const TYPES=['accountant','receptionist','administrative','transport','librarian','attender','security'];
 const blank={employee_number:'',name:'',staff_type:'administrative',phone:'',email:'',address:'',joining_date:'',employment_status:'active'};
 export default function Staff(){
@@ -31,5 +32,5 @@ export default function Staff(){
  {loading?<p role="status">Loading staff…</p>:!items.length?<p>No staff found.</p>:items.map(s=><article className="card" key={s.id}><h3>{s.name} · {s.employee_number}</h3><p>{s.staff_type} · {s.employment_status} · joined {s.joining_date}</p>{s.phone&&<p>{s.phone}</p>}{s.email&&<p>{s.email}</p>}
  <button disabled={busy} onClick={()=>{setEditing(s.id);setForm({employee_number:s.employee_number,name:s.name,staff_type:s.staff_type,phone:s.phone||'',email:s.email||'',address:s.address||'',joining_date:s.joining_date,employment_status:s.employment_status});}}>Edit</button> <button disabled={busy} onClick={()=>setRemoving(s)}>Delete</button></article>)}
  {removing&&<div className="card" role="alert"><p>Permanently delete {removing.name}? Use inactive status for staff who left.</p><button disabled={busy} onClick={remove}>Confirm delete</button> <button disabled={busy} onClick={()=>setRemoving(null)}>Cancel</button></div>}
- <button disabled={loading||offset===0} onClick={()=>setOffset(Math.max(0,offset-25))}>Previous</button> <button disabled={loading||items.length<25} onClick={()=>setOffset(offset+25)}>Next</button></div></div></section>;
+ <button disabled={loading||offset===0} onClick={()=>setOffset(Math.max(0,offset-25))}>Previous</button> <button disabled={loading||items.length<25} onClick={()=>setOffset(offset+25)}>Next</button></div>{editing&&<StaffExtensions staff={items.find(s=>s.id===editing)} user={{role:'admin'}}/>}</div></section>;
 }

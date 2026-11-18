@@ -1,6 +1,7 @@
 import React,{useEffect,useState} from 'react';
 import {api} from '../api/client';
 import {allPages} from '../api/pagination';
+import HomeworkExtensions from '../components/HomeworkExtensions';
 const blank={section_id:'',subject_id:'',title:'',details:'',due_on:''};
 export default function Homework({user}){
  const staff=['admin','teacher'].includes(user.role),student=user.role==='student';
@@ -31,5 +32,5 @@ export default function Homework({user}){
  {loading?<p role="status">Loading homework…</p>:!items.length?<p>No homework to show.</p>:items.map(h=>{const done=student&&myStudent&&h.completed_student_ids?.includes(myStudent);return <article className="card" key={h.id}><h3>{h.title}{h.archived_at?' (archived)':''}</h3><p>{h.subject_name} · {h.class_name} / {h.section_name} · due {h.due_on}</p><p style={{whiteSpace:'pre-wrap'}}>{h.details}</p><p className="muted">Posted by {h.posted_by} on {h.assigned_on}{staff?` · ${h.completion_count} completed`:''}{!staff&&!student&&h.completed_student_ids?.length?` · ${h.completed_student_ids.length} child(ren) completed`:''}</p>
  {student&&<button disabled={busy} onClick={()=>run(()=>api(`/homework/${h.id}/complete`,{method:done?'DELETE':'POST'}),done?'Marked as not completed.':'Marked as completed.')}>{done?'Mark as not done':'Mark as done'}</button>}
  {staff&&!h.archived_at&&<><button disabled={busy} onClick={()=>{setEditing(h.id);setForm({section_id:h.section_id,subject_id:h.subject_id,title:h.title,details:h.details,due_on:h.due_on});}}>Edit</button> <button disabled={busy} onClick={()=>run(()=>api(`/homework/${h.id}/archive`,{method:'POST'}),'Homework archived.')}>Archive</button></>}</article>;})}
- <button disabled={loading||offset===0} onClick={()=>setOffset(Math.max(0,offset-25))}>Previous</button> <button disabled={loading||items.length<25} onClick={()=>setOffset(offset+25)}>Next</button></div></div></section>;
+ <button disabled={loading||offset===0} onClick={()=>setOffset(Math.max(0,offset-25))}>Previous</button> <button disabled={loading||items.length<25} onClick={()=>setOffset(offset+25)}>Next</button></div>{editing&&items.find(h=>h.id===editing)&&<HomeworkExtensions homework={items.find(h=>h.id===editing)} user={user}/>}</div></section>;
 }

@@ -2061,3 +2061,63 @@ CREATE TABLE user_mfa_secrets (
  last_used_at timestamptz
 );
 CREATE INDEX user_mfa_secrets_enabled_idx ON user_mfa_secrets(user_id) WHERE enabled_at IS NOT NULL;
+
+-- Notification outbox (referenced by §2.5 attendance, §2.13 communication, §2.15 certificates,
+-- §2.12 transport expiry, §2.9 homework). Provider delivery is P2; this table records the intent
+-- transactionally with the business action so a worker can pick it up later.
+CREATE TABLE notification_outbox (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ event_type varchar(40) NOT NULL CHECK(length(trim(event_type)) BETWEEN 1 AND 40),
+ channel varchar(10) NOT NULL CHECK(channel IN ('in_app','email','sms','whatsapp')),
+ recipient_ref varchar(254) NOT NULL,
+ template_key varchar(60) NOT NULL CHECK(length(trim(template_key)) BETWEEN 1 AND 60),
+ payload_ref uuid,
+ status varchar(12) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed','dead')),
+ attempt_count integer NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ provider_message_id varchar(200),
+ last_error_code varchar(60),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ sent_at timestamptz
+);
+CREATE INDEX notification_outbox_status_next_idx ON notification_outbox(status, next_attempt_at);
+CREATE INDEX notification_outbox_school_created_idx ON notification_outbox(school_id, created_at DESC);
+CREATE INDEX notification_outbox_recipient_idx ON notification_outbox(school_id, recipient_ref);
+
+CREATE TABLE notification_delivery_attempts (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ outbox_id uuid NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+ attempted_at timestamptz NOT NULL DEFAULT now(),
+ success boolean NOT NULL,
+ provider_response_code varchar(20),
+ provider_response_ref varchar(200),
+ error_message varchar(500)
+);
+CREATE INDEX notification_delivery_attempts_outbox_idx ON notification_delivery_attempts(outbox_id, attempted_at);
+
+-- Student documents (§2.2 P1). Tenant-owned document table with MIME/size guards per D1.
+-- Supports the profile "documents" tab: upload, list, download with tenant-scoped authorization.
+CREATE TABLE student_documents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX student_documents_student_idx ON student_documents(student_id);
+CREATE INDEX student_documents_school_idx ON student_documents(school_id, created_at DESC);
+
+-- Dashboard KPI indexes (§2.1). Add only where EXPLAIN would benefit on a realistic dataset.
+-- These are tenant-scoped composite indexes that the dashboard queries filter on.
+CREATE INDEX IF NOT EXISTS students_school_lifecycle_idx ON students(school_id, lifecycle_status);
+CREATE INDEX IF NOT EXISTS staff_members_school_type_status_idx ON staff_members(school_id, staff_type, employment_status);
+CREATE INDEX IF NOT EXISTS attendance_registers_school_date_idx ON attendance_registers(school_id, attendance_date DESC);
+CREATE INDEX IF NOT EXISTS fee_payments_school_paid_on_idx ON fee_payments(school_id, paid_on DESC) WHERE reversed_at IS NULL;
+CREATE INDEX IF NOT EXISTS fee_invoices_school_year_due_idx ON fee_invoices(school_id, academic_year_id, due_on) WHERE voided_at IS NULL;
+CREATE INDEX IF NOT EXISTS exams_school_year_status_idx ON exams(school_id, academic_year_id, status);
+CREATE INDEX IF NOT EXISTS notices_school_status_available_idx ON notices(school_id, status, available_from DESC);
+CREATE INDEX IF NOT EXISTS leave_requests_school_status_idx ON leave_requests(school_id, status, requested_at DESC);

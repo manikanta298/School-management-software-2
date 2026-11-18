@@ -2,6 +2,7 @@ import React,{useEffect,useState} from 'react';
 import {api} from '../api/client';
 import {allPages} from '../api/pagination';
 import ExamDetails from './ExamDetails';
+import ExamExtensions from '../components/ExamExtensions';
 export default function Exams({user}){
  const admin=user.role==='admin',staff=['admin','teacher'].includes(user.role);
  const [items,setItems]=useState([]),[classes,setClasses]=useState([]),[years,setYears]=useState([]),[terms,setTerms]=useState([]),[subjects,setSubjects]=useState([]),[students,setStudents]=useState([]),[scales,setScales]=useState([]),[mode,setMode]=useState('exams'),[filter,setFilter]=useState({}),[offset,setOffset]=useState(0),[selected,setSelected]=useState(null),[draft,setDraft]=useState({}),[scaleName,setScaleName]=useState(''),[bands,setBands]=useState([{minimum_percent:0,label:'F'},{minimum_percent:50,label:'P'}]),[loading,setLoading]=useState(true),[busy,setBusy]=useState(false),[error,setError]=useState(''),[notice,setNotice]=useState(''),[revision,setRevision]=useState(0);
@@ -19,6 +20,7 @@ export default function Exams({user}){
  {!items.length&&<p>No accessible exams for this selection.</p>}{items.map(e=><article className="card" key={e.id}><h2>{e.name}</h2><p>{e.class_name} · {e.academic_year_name} · {e.status}</p><p>{String(e.start_date).slice(0,10)} to {String(e.end_date).slice(0,10)}</p><button onClick={()=>setSelected(e.id)}>{staff?'Manage / view exam':'View results'}</button></article>)}<button disabled={offset===0} onClick={()=>{setSelected(null);setOffset(v=>Math.max(0,v-25));}}>Previous</button> <button disabled={items.length<25} onClick={()=>{setSelected(null);setOffset(v=>v+25);}}>Next</button><p>Page {Math.floor(offset/25)+1}</p>
  {selected&&<ExamDetails key={selected} id={selected} user={user} subjects={subjects} students={students} onClose={()=>setSelected(null)} onChanged={()=>setRevision(v=>v+1)}/>}
  </>}
+ <ExamExtensions exam={selected?{id:selected}:null} user={user}/>
  </>}
  </section>;
 }
