@@ -1030,3 +1030,537 @@ CREATE TABLE school_events (
 );
 CREATE INDEX school_events_dates_idx ON school_events(starts_on,ends_on);
 CREATE INDEX school_events_creator_idx ON school_events(created_by);
+
+-- ============================================================================
+-- 017_transport_capacity_guards.sql
+-- ============================================================================
+CREATE OR REPLACE FUNCTION validate_transport_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE vehicle uuid; seats integer; used integer;
+BEGIN
+ SELECT r.vehicle_id INTO vehicle FROM transport_stops s JOIN transport_routes r ON r.id=s.route_id WHERE s.id=NEW.stop_id FOR SHARE OF r;
+ IF vehicle IS NULL THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=vehicle FOR UPDATE;
+ SELECT count(*) INTO used FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle AND a.academic_year_id=NEW.academic_year_id AND a.id<>NEW.id;
+ IF used>=seats THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+CREATE FUNCTION validate_transport_route_vehicle() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE seats integer;
+BEGIN
+ IF NEW.vehicle_id IS NULL OR NEW.vehicle_id IS NOT DISTINCT FROM OLD.vehicle_id THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=NEW.vehicle_id FOR UPDATE;
+ IF NOT FOUND THEN RETURN NEW; END IF;
+ IF EXISTS(
+  SELECT 1 FROM (
+   SELECT a.academic_year_id FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.vehicle_id AND r.id<>NEW.id
+   UNION
+   SELECT a.academic_year_id FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.id=NEW.id
+  ) years
+  WHERE (SELECT count(*) FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.vehicle_id AND r.id<>NEW.id AND a.academic_year_id=years.academic_year_id)
+   +(SELECT count(*) FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.id=NEW.id AND a.academic_year_id=years.academic_year_id)>seats
+ ) THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+DROP TRIGGER transport_routes_load ON transport_routes;
+CREATE TRIGGER transport_routes_load BEFORE UPDATE OF vehicle_id ON transport_routes FOR EACH ROW EXECUTE FUNCTION validate_transport_route_vehicle();
+
+CREATE FUNCTION validate_transport_vehicle_capacity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.id GROUP BY a.academic_year_id HAVING count(*)>NEW.capacity) THEN
+  RAISE EXCEPTION 'Vehicle capacity is below its allocated students' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+DROP TRIGGER transport_vehicles_capacity ON transport_vehicles;
+CREATE TRIGGER transport_vehicles_capacity BEFORE UPDATE OF capacity ON transport_vehicles FOR EACH ROW EXECUTE FUNCTION validate_transport_vehicle_capacity();
+
+-- ============================================================================
+-- 018_multi_tenant_foundation.sql
+-- ============================================================================
+-- Multi-tenant foundation.
+-- Existing rows are assigned to one initial school. Application-level tenant
+-- enforcement and tenant-aware composite foreign keys are introduced in follow-up work.
+
+CREATE TABLE schools (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name varchar(150) NOT NULL
+        CHECK (length(trim(name)) BETWEEN 1 AND 150),
+    slug varchar(80) NOT NULL UNIQUE
+        CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    status varchar(12) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended', 'archived')),
+    timezone varchar(60) NOT NULL DEFAULT 'Asia/Kolkata',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE school_memberships (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id uuid NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role varchar(10) NOT NULL
+        CHECK (role IN ('admin', 'teacher', 'student', 'parent')),
+    status varchar(10) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'inactive', 'suspended')),
+    is_default boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, school_id),
+    UNIQUE (id, school_id)
+);
+
+CREATE UNIQUE INDEX school_memberships_one_default_per_user
+    ON school_memberships(user_id)
+    WHERE is_default = true;
+
+CREATE INDEX school_memberships_school_role_idx
+    ON school_memberships(school_id, role, status);
+
+CREATE INDEX school_memberships_user_status_idx
+    ON school_memberships(user_id, status);
+
+-- Create the initial tenant. Rename this school after migration using real
+-- school details; do not create a second tenant until API isolation is complete.
+INSERT INTO schools (name, slug)
+VALUES ('Existing School', 'existing-school');
+
+-- Preserve every existing account and its current role as a membership.
+INSERT INTO school_memberships (
+    school_id, user_id, role, status, is_default
+)
+SELECT
+    (SELECT id FROM schools WHERE slug = 'existing-school'),
+    id,
+    role,
+    CASE WHEN active THEN 'active' ELSE 'inactive' END,
+    true
+FROM users;
+
+-- Scope all current school-owned tables to the initial tenant.
+DO $$
+DECLARE
+    table_name text;
+    first_school_id uuid;
+    tenant_tables text[] := ARRAY[
+        'academic_years', 'terms', 'classes', 'sections', 'subjects',
+        'students', 'parents', 'student_parents', 'enrollments',
+        'teachers', 'teacher_assignments',
+        'attendance_registers', 'attendance_entries', 'attendance_audit',
+        'fee_structures', 'fee_invoices', 'fee_payments', 'fee_events',
+        'exam_grading_scales', 'exam_grade_bands', 'exams',
+        'exam_candidates', 'exam_papers', 'exam_marks', 'exam_mark_audit',
+        'exam_events', 'school_rooms', 'timetable_slots', 'timetable_audit',
+        'notices', 'notice_reads', 'notice_audit',
+        'student_status_history', 'staff_members', 'homework',
+        'homework_completions', 'transport_vehicles', 'transport_routes',
+        'transport_stops', 'transport_allocations', 'school_events'
+    ];
+BEGIN
+    SELECT id INTO STRICT first_school_id
+    FROM schools
+    WHERE slug = 'existing-school';
+
+    FOREACH table_name IN ARRAY tenant_tables LOOP
+        EXECUTE format(
+            'ALTER TABLE %I ADD COLUMN school_id uuid',
+            table_name
+        );
+
+        EXECUTE format(
+            'UPDATE %I SET school_id = $1 WHERE school_id IS NULL',
+            table_name
+        ) USING first_school_id;
+
+        EXECUTE format(
+            'ALTER TABLE %I ALTER COLUMN school_id SET NOT NULL',
+            table_name
+        );
+
+        EXECUTE format(
+            'ALTER TABLE %I ADD CONSTRAINT %I
+             FOREIGN KEY (school_id) REFERENCES schools(id)
+             ON DELETE RESTRICT',
+            table_name,
+            table_name || '_school_id_fkey'
+        );
+
+        EXECUTE format(
+            'CREATE INDEX %I ON %I (school_id)',
+            table_name || '_school_id_idx',
+            table_name
+        );
+    END LOOP;
+END $$;
+
+-- Bind each existing authenticated session to the user's initial-school
+-- membership. The next auth change will resolve this context on every request.
+ALTER TABLE auth_sessions
+    ADD COLUMN active_school_id uuid;
+
+UPDATE auth_sessions
+SET active_school_id = (
+    SELECT id FROM schools WHERE slug = 'existing-school'
+);
+
+ALTER TABLE auth_sessions
+    ALTER COLUMN active_school_id SET NOT NULL;
+
+ALTER TABLE auth_sessions
+    ADD CONSTRAINT auth_sessions_school_membership_fkey
+    FOREIGN KEY (user_id, active_school_id)
+    REFERENCES school_memberships(user_id, school_id)
+    ON DELETE RESTRICT;
+
+CREATE INDEX auth_sessions_active_school_idx
+    ON auth_sessions(active_school_id);
+
+COMMENT ON TABLE schools IS
+    'Tenant root: each school owns its school-scoped academic and operational data.';
+COMMENT ON TABLE school_memberships IS
+    'Maps a global user identity to a school-specific role and membership status.';
+COMMENT ON COLUMN auth_sessions.active_school_id IS
+    'School context selected for this authenticated session.';
+
+-- ============================================================================
+-- 019_transport_tenant_integrity.sql
+-- ============================================================================
+-- Enforce school ownership throughout transport relationships.
+-- Migration 018 has already populated school_id for every existing row.
+BEGIN;
+
+ALTER TABLE transport_vehicles
+  ADD CONSTRAINT transport_vehicles_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE transport_routes
+  ADD CONSTRAINT transport_routes_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE transport_stops
+  ADD CONSTRAINT transport_stops_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE students
+  ADD CONSTRAINT students_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE academic_years
+  ADD CONSTRAINT academic_years_id_school_unique UNIQUE (id, school_id);
+
+-- Permit the same registration and route name in different schools.
+ALTER TABLE transport_vehicles
+  DROP CONSTRAINT IF EXISTS transport_vehicles_registration_number_key;
+CREATE UNIQUE INDEX transport_vehicles_school_registration_unique
+  ON transport_vehicles(school_id, registration_number);
+DROP INDEX IF EXISTS transport_routes_name_unique;
+CREATE UNIQUE INDEX transport_routes_school_name_unique
+  ON transport_routes(school_id, lower(name));
+
+ALTER TABLE transport_routes
+  ADD CONSTRAINT transport_routes_vehicle_same_school_fk
+  FOREIGN KEY (vehicle_id, school_id)
+  REFERENCES transport_vehicles(id, school_id)
+  ON DELETE RESTRICT;
+
+ALTER TABLE transport_stops
+  ADD CONSTRAINT transport_stops_route_same_school_fk
+  FOREIGN KEY (route_id, school_id)
+  REFERENCES transport_routes(id, school_id)
+  ON DELETE RESTRICT;
+
+ALTER TABLE transport_allocations
+  ADD CONSTRAINT transport_allocations_student_same_school_fk
+  FOREIGN KEY (student_id, school_id)
+  REFERENCES students(id, school_id)
+  ON DELETE RESTRICT,
+  ADD CONSTRAINT transport_allocations_stop_same_school_fk
+  FOREIGN KEY (stop_id, school_id)
+  REFERENCES transport_stops(id, school_id)
+  ON DELETE RESTRICT,
+  ADD CONSTRAINT transport_allocations_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id)
+  ON DELETE RESTRICT;
+
+CREATE INDEX transport_vehicles_school_idx ON transport_vehicles(school_id);
+CREATE INDEX transport_routes_school_idx ON transport_routes(school_id);
+CREATE INDEX transport_stops_school_idx ON transport_stops(school_id);
+CREATE INDEX transport_allocations_school_idx ON transport_allocations(school_id);
+
+-- ============================================================================
+-- 020_academic_tenant_integrity.sql
+-- ============================================================================
+-- Scope academic catalogue records and enforce same-school parent relationships.
+ALTER TABLE terms
+  ADD CONSTRAINT terms_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE classes
+  ADD CONSTRAINT classes_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE sections
+  ADD CONSTRAINT sections_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE subjects
+  ADD CONSTRAINT subjects_id_school_unique UNIQUE (id, school_id);
+
+ALTER TABLE terms
+  ADD CONSTRAINT terms_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+ALTER TABLE classes
+  ADD CONSTRAINT classes_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+ALTER TABLE sections
+  ADD CONSTRAINT sections_class_same_school_fk
+  FOREIGN KEY (class_id, school_id)
+  REFERENCES classes(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS academic_years_name_unique;
+CREATE UNIQUE INDEX academic_years_school_name_unique
+  ON academic_years(school_id, lower(name));
+DROP INDEX IF EXISTS academic_years_single_current;
+CREATE UNIQUE INDEX academic_years_school_single_current
+  ON academic_years(school_id) WHERE is_current;
+
+CREATE INDEX academic_years_school_dates_idx
+  ON academic_years(school_id, start_date, end_date);
+CREATE INDEX terms_school_year_dates_idx
+  ON terms(school_id, academic_year_id, start_date, end_date);
+CREATE INDEX classes_school_year_idx
+  ON classes(school_id, academic_year_id);
+CREATE INDEX sections_school_class_idx
+  ON sections(school_id, class_id);
+
+ALTER TABLE subjects DROP CONSTRAINT IF EXISTS subjects_code_key;
+DROP INDEX IF EXISTS subjects_name_unique;
+CREATE UNIQUE INDEX subjects_school_code_unique
+  ON subjects(school_id, code);
+CREATE UNIQUE INDEX subjects_school_name_unique
+  ON subjects(school_id, lower(name));
+CREATE INDEX subjects_school_idx ON subjects(school_id);
+
+-- ============================================================================
+-- 021_student_parent_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for student, parent, enrollment and family links.
+-- Migration 018 assigned all existing records to the initial school.
+ALTER TABLE parents
+  DROP CONSTRAINT IF EXISTS parents_user_id_key,
+  ADD CONSTRAINT parents_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE parents
+  ADD CONSTRAINT parents_school_user_unique UNIQUE (school_id, user_id);
+
+ALTER TABLE students
+  DROP CONSTRAINT IF EXISTS students_user_id_key;
+ALTER TABLE students
+  ADD CONSTRAINT students_school_user_unique UNIQUE (school_id, user_id);
+
+ALTER TABLE students
+  DROP CONSTRAINT IF EXISTS students_admission_number_key;
+CREATE UNIQUE INDEX students_school_admission_number_unique
+  ON students(school_id, admission_number);
+
+ALTER TABLE student_parents
+  ADD CONSTRAINT student_parents_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT student_parents_parent_same_school_fk
+    FOREIGN KEY (parent_id, school_id)
+    REFERENCES parents(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE enrollments
+  ADD CONSTRAINT enrollments_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id)
+    REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_class_same_school_fk
+    FOREIGN KEY (class_id, school_id)
+    REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_section_same_school_fk
+    FOREIGN KEY (section_id, school_id)
+    REFERENCES sections(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE student_status_history
+  ADD CONSTRAINT student_status_history_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX student_parents_school_parent_idx
+  ON student_parents(school_id, parent_id, student_id);
+CREATE INDEX enrollments_school_student_year_idx
+  ON enrollments(school_id, student_id, academic_year_id);
+CREATE INDEX student_status_history_school_student_idx
+  ON student_status_history(school_id, student_id, changed_at DESC);
+
+-- ============================================================================
+-- 022_teacher_staff_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for teacher profiles, assignments and staff.
+-- Existing records retain the school_id assigned by migration 018.
+ALTER TABLE teachers
+  DROP CONSTRAINT IF EXISTS teachers_user_id_key,
+  DROP CONSTRAINT IF EXISTS teachers_employee_number_key,
+  ADD CONSTRAINT teachers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT teachers_school_user_unique UNIQUE (school_id, user_id);
+CREATE UNIQUE INDEX teachers_school_employee_number_unique
+  ON teachers(school_id, employee_number);
+CREATE INDEX teachers_school_status_idx
+  ON teachers(school_id, employment_status);
+
+ALTER TABLE teacher_assignments
+  ADD CONSTRAINT teacher_assignments_teacher_same_school_fk
+    FOREIGN KEY (teacher_id, school_id)
+    REFERENCES teachers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_class_same_school_fk
+    FOREIGN KEY (class_id, school_id)
+    REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id)
+    REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_subject_same_school_fk
+    FOREIGN KEY (subject_id, school_id)
+    REFERENCES subjects(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS teacher_assignments_class_teacher_unique;
+DROP INDEX IF EXISTS teacher_assignments_subject_unique;
+CREATE UNIQUE INDEX teacher_assignments_school_class_teacher_unique
+  ON teacher_assignments(school_id, class_id) WHERE kind='class_teacher';
+CREATE UNIQUE INDEX teacher_assignments_school_subject_unique
+  ON teacher_assignments(school_id, class_id, subject_id) WHERE kind='subject_teacher';
+CREATE INDEX teacher_assignments_school_teacher_idx
+  ON teacher_assignments(school_id, teacher_id, class_id);
+
+ALTER TABLE staff_members
+  DROP CONSTRAINT IF EXISTS staff_members_employee_number_key;
+CREATE UNIQUE INDEX staff_members_school_employee_number_unique
+  ON staff_members(school_id, employee_number);
+CREATE INDEX staff_members_school_type_status_idx
+  ON staff_members(school_id, staff_type, employment_status);
+
+-- ============================================================================
+-- 023_attendance_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership throughout attendance registers, entries and audit history.
+-- Migration 018 assigned existing attendance records to the initial school.
+ALTER TABLE attendance_registers
+  ADD CONSTRAINT attendance_registers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT attendance_registers_section_same_school_fk
+    FOREIGN KEY (section_id, school_id) REFERENCES sections(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_registers_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_registers_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE enrollments
+  ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+
+ALTER TABLE attendance_entries
+  ADD CONSTRAINT attendance_entries_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT attendance_entries_register_same_school_fk
+    FOREIGN KEY (register_id, school_id) REFERENCES attendance_registers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_entries_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_entries_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE attendance_audit
+  ADD CONSTRAINT attendance_audit_entry_same_school_fk
+    FOREIGN KEY (entry_id, school_id) REFERENCES attendance_entries(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS attendance_entries_student_day_unique;
+CREATE UNIQUE INDEX attendance_entries_school_student_day_unique
+  ON attendance_entries(school_id, student_id, attendance_date) WHERE status <> 'void';
+
+CREATE INDEX attendance_registers_school_section_date_idx
+  ON attendance_registers(school_id, section_id, attendance_date);
+CREATE INDEX attendance_entries_school_register_idx
+  ON attendance_entries(school_id, register_id, student_id);
+CREATE INDEX attendance_entries_school_student_date_idx
+  ON attendance_entries(school_id, student_id, attendance_date);
+CREATE INDEX attendance_audit_school_entry_idx
+  ON attendance_audit(school_id, entry_id, id);
+
+
+-- Keep audit rows in the same tenant as the attendance entry that generated them.
+CREATE OR REPLACE FUNCTION audit_attendance_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO attendance_audit(school_id,entry_id,new_status,new_note,changed_by)
+  VALUES(NEW.school_id,NEW.id,NEW.status,NEW.note,NEW.updated_by);
+ ELSIF (NEW.status,NEW.note) IS DISTINCT FROM (OLD.status,OLD.note) THEN
+  INSERT INTO attendance_audit(school_id,entry_id,previous_status,previous_note,new_status,new_note,reason,changed_by)
+  VALUES(NEW.school_id,NEW.id,OLD.status,OLD.note,NEW.status,NEW.note,NEW.change_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 024_fees_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for fee structures, invoices, payments and audit events.
+-- Migration 018 assigned existing fee records to the initial school.
+-- Depends on 023 (enrollments_id_school_unique); guarded so it also applies if 023 is absent.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enrollments_id_school_unique') THEN
+    ALTER TABLE enrollments ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+  END IF;
+END $$;
+
+ALTER TABLE fee_structures
+  ADD CONSTRAINT fee_structures_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_structures_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_structures_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE fee_invoices
+  ADD CONSTRAINT fee_invoices_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_invoices_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_structure_same_school_fk
+    FOREIGN KEY (fee_structure_id, school_id) REFERENCES fee_structures(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE fee_payments
+  DROP CONSTRAINT IF EXISTS fee_payments_idempotency_key_key,
+  ADD CONSTRAINT fee_payments_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_payments_invoice_same_school_fk
+    FOREIGN KEY (invoice_id, school_id) REFERENCES fee_invoices(id, school_id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX fee_payments_school_idempotency_unique
+  ON fee_payments(school_id, idempotency_key);
+
+ALTER TABLE fee_events
+  ADD CONSTRAINT fee_events_invoice_same_school_fk
+    FOREIGN KEY (invoice_id, school_id) REFERENCES fee_invoices(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_events_payment_same_school_fk
+    FOREIGN KEY (payment_id, school_id) REFERENCES fee_payments(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX fee_structures_school_class_year_idx ON fee_structures(school_id, class_id, academic_year_id);
+CREATE INDEX fee_invoices_school_student_idx ON fee_invoices(school_id, student_id);
+CREATE INDEX fee_invoices_school_year_due_idx ON fee_invoices(school_id, academic_year_id, due_on);
+CREATE INDEX fee_payments_school_invoice_idx ON fee_payments(school_id, invoice_id, reversed_at);
+CREATE INDEX fee_events_school_invoice_idx ON fee_events(school_id, invoice_id, id);
+
+-- Audit triggers must write the owning school on every fee event.
+CREATE OR REPLACE FUNCTION audit_fee_invoice() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    INSERT INTO fee_events(school_id,invoice_id,kind,amount_minor,actor_id)
+    VALUES(NEW.school_id,NEW.id,'invoice_issued',NEW.amount_minor,NEW.created_by);
+  ELSE
+    INSERT INTO fee_events(school_id,invoice_id,kind,amount_minor,actor_id,reason)
+    VALUES(NEW.school_id,NEW.id,'invoice_voided',NEW.amount_minor,NEW.voided_by,NEW.void_reason);
+  END IF;
+  RETURN NEW;
+END; $$;
+
+CREATE OR REPLACE FUNCTION audit_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    INSERT INTO fee_events(school_id,invoice_id,payment_id,kind,amount_minor,actor_id)
+    VALUES(NEW.school_id,NEW.invoice_id,NEW.id,'payment_recorded',NEW.amount_minor,NEW.recorded_by);
+  ELSE
+    INSERT INTO fee_events(school_id,invoice_id,payment_id,kind,amount_minor,actor_id,reason)
+    VALUES(NEW.school_id,NEW.invoice_id,NEW.id,'payment_reversed',NEW.amount_minor,NEW.reversed_by,NEW.reversal_reason);
+  END IF;
+  RETURN NEW;
+END; $$;
