@@ -37,7 +37,7 @@ export async function apiText(path,retry=true){
 }
 // Fetch binary data (xlsx, pdf, bytea) as a Blob. Used by Reports and attachment downloads.
 export async function apiBlob(path,retry=true){
- const response=await fetch(`${base}${path}`,{credentials:'include',headers:accessToken?{Authorization:`Bearer ${accessToken}`}:{}});
+ const response=await fetchWithTimeout(`${base}${path}`,{credentials:'include',headers:accessToken?{Authorization:`Bearer ${accessToken}`}:{}});
  if(response.status===401&&retry){await restore();return apiBlob(path,false);}
  if(!response.ok){let message='Request failed';try{message=(await response.json()).message||message;}catch{}throw new Error(message);}
  return response.blob();
