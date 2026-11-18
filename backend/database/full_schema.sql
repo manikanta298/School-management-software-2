@@ -1,0 +1,2274 @@
+-- Consolidated School Management Database Schema
+-- Source: backend/database/migrations/*.sql from manikanta298/School-management-software-2 @ main
+-- Generated in the exact lexicographic order used by backend/database/run-migrations.js.
+-- PostgreSQL. Run against a fresh database only; this is not an upgrade script.
+-- Generated from 42 migration files. Do not edit migration history to modify an existing database.
+
+BEGIN;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- ============================================================================
+-- 001_auth.sql
+-- ============================================================================
+CREATE TABLE users (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ name varchar(100) NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 100),
+ email varchar(254) NOT NULL UNIQUE CHECK (email = lower(email)),
+ password_hash text NOT NULL,
+ role varchar(10) NOT NULL CHECK (role IN ('admin','teacher','student','parent')),
+ active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE auth_sessions (
+ id uuid PRIMARY KEY,
+ user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ token_hash char(64) NOT NULL UNIQUE,
+ expires_at timestamptz NOT NULL,
+ revoked_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ CHECK (expires_at > created_at)
+);
+CREATE INDEX auth_sessions_user_id_idx ON auth_sessions(user_id);
+CREATE INDEX auth_sessions_expires_at_idx ON auth_sessions(expires_at);
+CREATE INDEX users_role_idx ON users(role);
+
+-- ============================================================================
+-- 002_academic.sql
+-- ============================================================================
+CREATE TABLE academic_years (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ start_date date NOT NULL, end_date date NOT NULL,
+ is_current boolean NOT NULL DEFAULT false,
+ CHECK(end_date>=start_date)
+);
+CREATE UNIQUE INDEX academic_years_name_unique ON academic_years(lower(name));
+CREATE UNIQUE INDEX academic_years_single_current ON academic_years(is_current) WHERE is_current;
+CREATE TABLE terms (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ start_date date NOT NULL, end_date date NOT NULL,
+ CHECK(end_date>=start_date)
+);
+CREATE UNIQUE INDEX terms_name_unique ON terms(academic_year_id,lower(name));
+CREATE INDEX terms_dates_idx ON terms(academic_year_id,start_date,end_date);
+CREATE TABLE classes (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0)
+);
+CREATE UNIQUE INDEX classes_name_unique ON classes(academic_year_id,lower(name));
+CREATE TABLE sections (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ class_id uuid NOT NULL REFERENCES classes(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ capacity integer NOT NULL CHECK(capacity BETWEEN 1 AND 500)
+);
+CREATE UNIQUE INDEX sections_name_unique ON sections(class_id,lower(name));
+CREATE TABLE subjects (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ code varchar(20) NOT NULL UNIQUE CHECK(code ~ '^[A-Z0-9_-]{1,20}$')
+);
+CREATE UNIQUE INDEX subjects_name_unique ON subjects(lower(name));
+CREATE FUNCTION validate_term_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE y academic_years;
+BEGIN
+ SELECT * INTO y FROM academic_years WHERE id=NEW.academic_year_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Academic year does not exist' USING ERRCODE='23503'; END IF;
+ IF NEW.start_date<y.start_date OR NEW.end_date>y.end_date THEN
+ RAISE EXCEPTION 'Term dates must fall within academic year' USING ERRCODE='23514'; END IF;
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.academic_year_id AND id<>NEW.id AND start_date<=NEW.end_date AND end_date>=NEW.start_date) THEN
+ RAISE EXCEPTION 'Term dates overlap' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER terms_validate_dates BEFORE INSERT OR UPDATE ON terms FOR EACH ROW EXECUTE FUNCTION validate_term_dates();
+CREATE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) THEN
+ RAISE EXCEPTION 'Existing terms must fit within academic year' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER years_validate_dates BEFORE UPDATE ON academic_years FOR EACH ROW EXECUTE FUNCTION validate_year_dates();
+
+-- ============================================================================
+-- 003_students_parents.sql
+-- ============================================================================
+ALTER TABLE users ADD CONSTRAINT users_id_role_unique UNIQUE(id,role);
+ALTER TABLE classes ADD CONSTRAINT classes_id_year_unique UNIQUE(id,academic_year_id);
+ALTER TABLE sections ADD CONSTRAINT sections_id_class_unique UNIQUE(id,class_id);
+CREATE TABLE students (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id uuid NOT NULL UNIQUE,
+ account_role varchar(10) NOT NULL DEFAULT 'student' CHECK(account_role='student'),
+ admission_number varchar(30) NOT NULL UNIQUE CHECK(admission_number ~ '^[A-Z0-9_-]{1,30}$'),
+ admission_date date NOT NULL CHECK(admission_date<=CURRENT_DATE),
+ date_of_birth date CHECK(date_of_birth<=admission_date),
+ address varchar(500),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(user_id,account_role) REFERENCES users(id,role) ON DELETE RESTRICT
+);
+CREATE TABLE parents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id uuid NOT NULL UNIQUE,
+ account_role varchar(10) NOT NULL DEFAULT 'parent' CHECK(account_role='parent'),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ address varchar(500),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(user_id,account_role) REFERENCES users(id,role) ON DELETE RESTRICT
+);
+CREATE TABLE student_parents (
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ parent_id uuid NOT NULL REFERENCES parents(id) ON DELETE RESTRICT,
+ relationship varchar(20) NOT NULL CHECK(relationship IN ('mother','father','guardian','other')),
+ PRIMARY KEY(student_id,parent_id)
+);
+CREATE INDEX student_parents_parent_idx ON student_parents(parent_id,student_id);
+CREATE TABLE enrollments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ academic_year_id uuid NOT NULL,
+ class_id uuid NOT NULL,
+ section_id uuid NOT NULL,
+ enrolled_on date NOT NULL,
+ status varchar(10) NOT NULL DEFAULT 'active' CHECK(status IN ('active','withdrawn','completed')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(student_id,academic_year_id),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT,
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT
+);
+CREATE INDEX enrollments_section_status_idx ON enrollments(section_id,status);
+CREATE INDEX enrollments_class_year_idx ON enrollments(class_id,academic_year_id);
+CREATE INDEX enrollments_year_idx ON enrollments(academic_year_id);
+CREATE FUNCTION validate_enrollment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE y academic_years; admitted date; seats integer;
+BEGIN
+ SELECT * INTO y FROM academic_years WHERE id=NEW.academic_year_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Academic year not found' USING ERRCODE='23503'; END IF;
+ SELECT admission_date INTO admitted FROM students WHERE id=NEW.student_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Student not found' USING ERRCODE='23503'; END IF;
+ IF NEW.enrolled_on<y.start_date OR NEW.enrolled_on>y.end_date OR NEW.enrolled_on<admitted THEN
+ RAISE EXCEPTION 'Enrollment date must be within academic year and on or after admission' USING ERRCODE='23514'; END IF;
+ IF TG_OP='UPDATE' THEN
+ PERFORM id FROM sections WHERE id IN (NEW.section_id,OLD.section_id) ORDER BY id FOR UPDATE;
+ ELSE PERFORM id FROM sections WHERE id=NEW.section_id FOR UPDATE; END IF;
+ SELECT capacity INTO seats FROM sections WHERE id=NEW.section_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Section not found' USING ERRCODE='23503'; END IF;
+ IF NEW.status='active' AND (SELECT count(*) FROM enrollments WHERE section_id=NEW.section_id AND status='active' AND id<>NEW.id)>=seats THEN
+ RAISE EXCEPTION 'Section capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER enrollments_validate BEFORE INSERT OR UPDATE ON enrollments FOR EACH ROW EXECUTE FUNCTION validate_enrollment();
+CREATE FUNCTION validate_section_capacity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.capacity<(SELECT count(*) FROM enrollments WHERE section_id=NEW.id AND status='active') THEN
+ RAISE EXCEPTION 'Capacity cannot be below active enrollment count' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER sections_validate_capacity BEFORE UPDATE ON sections FOR EACH ROW EXECUTE FUNCTION validate_section_capacity();
+CREATE FUNCTION validate_student_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM enrollments WHERE student_id=NEW.id AND enrolled_on<NEW.admission_date) THEN
+ RAISE EXCEPTION 'Admission cannot be after an existing enrollment' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER students_validate_admission BEFORE UPDATE ON students FOR EACH ROW EXECUTE FUNCTION validate_student_admission();
+CREATE OR REPLACE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM enrollments WHERE academic_year_id=NEW.id AND (enrolled_on<NEW.start_date OR enrolled_on>NEW.end_date)) THEN
+ RAISE EXCEPTION 'Existing terms and enrollments must fit within academic year' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 004_teachers.sql
+-- ============================================================================
+CREATE TABLE teachers (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id uuid NOT NULL UNIQUE,
+ account_role varchar(10) NOT NULL DEFAULT 'teacher' CHECK(account_role='teacher'),
+ employee_number varchar(30) NOT NULL UNIQUE CHECK(employee_number ~ '^[A-Z0-9_-]{1,30}$'),
+ joining_date date NOT NULL CHECK(joining_date<=CURRENT_DATE),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ qualification varchar(200),
+ employment_status varchar(8) NOT NULL DEFAULT 'active' CHECK(employment_status IN ('active','inactive')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ FOREIGN KEY(user_id,account_role) REFERENCES users(id,role) ON DELETE RESTRICT
+);
+CREATE INDEX teachers_status_idx ON teachers(employment_status);
+CREATE TABLE teacher_assignments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ teacher_id uuid NOT NULL REFERENCES teachers(id) ON DELETE RESTRICT,
+ class_id uuid NOT NULL,
+ academic_year_id uuid NOT NULL,
+ kind varchar(20) NOT NULL CHECK(kind IN ('class_teacher','subject_teacher')),
+ subject_id uuid REFERENCES subjects(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK((kind='class_teacher' AND subject_id IS NULL) OR (kind='subject_teacher' AND subject_id IS NOT NULL)),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX teacher_assignments_class_teacher_unique ON teacher_assignments(class_id) WHERE kind='class_teacher';
+CREATE UNIQUE INDEX teacher_assignments_subject_unique ON teacher_assignments(class_id,subject_id) WHERE kind='subject_teacher';
+CREATE INDEX teacher_assignments_teacher_idx ON teacher_assignments(teacher_id,class_id);
+CREATE INDEX teacher_assignments_class_year_idx ON teacher_assignments(class_id,academic_year_id);
+CREATE INDEX teacher_assignments_year_idx ON teacher_assignments(academic_year_id);
+CREATE INDEX teacher_assignments_subject_idx ON teacher_assignments(subject_id);
+CREATE FUNCTION validate_teacher_assignment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE year_end date; hired date; employment varchar(8); account_active boolean;
+BEGIN
+ SELECT end_date INTO year_end FROM academic_years WHERE id=NEW.academic_year_id FOR UPDATE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Academic year not found' USING ERRCODE='23503'; END IF;
+ SELECT t.joining_date,t.employment_status,u.active INTO hired,employment,account_active FROM teachers t JOIN users u ON u.id=t.user_id WHERE t.id=NEW.teacher_id FOR UPDATE OF t,u;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Teacher not found' USING ERRCODE='23503'; END IF;
+ IF employment<>'active' OR NOT account_active THEN RAISE EXCEPTION 'Only active teachers can be assigned' USING ERRCODE='23514'; END IF;
+ IF hired>year_end THEN RAISE EXCEPTION 'Teacher joined after academic year ended' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER teacher_assignments_validate BEFORE INSERT OR UPDATE ON teacher_assignments FOR EACH ROW EXECUTE FUNCTION validate_teacher_assignment();
+CREATE FUNCTION validate_teacher_joining() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM teacher_assignments a JOIN academic_years y ON y.id=a.academic_year_id WHERE a.teacher_id=NEW.id AND NEW.joining_date>y.end_date) THEN
+ RAISE EXCEPTION 'Joining date must fit existing assignment years' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER teachers_validate_joining BEFORE UPDATE ON teachers FOR EACH ROW EXECUTE FUNCTION validate_teacher_joining();
+CREATE OR REPLACE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM enrollments WHERE academic_year_id=NEW.id AND (enrolled_on<NEW.start_date OR enrolled_on>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM teacher_assignments a JOIN teachers t ON t.id=a.teacher_id WHERE a.academic_year_id=NEW.id AND t.joining_date>NEW.end_date) THEN
+ RAISE EXCEPTION 'Existing terms, enrollments and teacher assignments must fit academic year' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 005_attendance.sql
+-- ============================================================================
+CREATE TABLE attendance_registers (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ section_id uuid NOT NULL,
+ class_id uuid NOT NULL,
+ academic_year_id uuid NOT NULL,
+ attendance_date date NOT NULL CHECK(attendance_date<=CURRENT_DATE),
+ version integer NOT NULL DEFAULT 0 CHECK(version>=0),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(section_id,attendance_date), UNIQUE(id,attendance_date),
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT,
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE INDEX attendance_registers_actor_idx ON attendance_registers(created_by);
+CREATE INDEX attendance_registers_class_year_idx ON attendance_registers(class_id,academic_year_id);
+CREATE INDEX attendance_registers_year_date_idx ON attendance_registers(academic_year_id,attendance_date);
+CREATE TABLE attendance_entries (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ register_id uuid NOT NULL,
+ attendance_date date NOT NULL,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ enrollment_id uuid NOT NULL REFERENCES enrollments(id) ON DELETE RESTRICT,
+ status varchar(8) NOT NULL CHECK(status IN ('present','absent','late','excused','void')),
+ note varchar(200), change_reason varchar(200),
+ updated_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(register_id,student_id),
+ FOREIGN KEY(register_id,attendance_date) REFERENCES attendance_registers(id,attendance_date) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX attendance_entries_student_day_unique ON attendance_entries(student_id,attendance_date) WHERE status<>'void';
+CREATE INDEX attendance_entries_actor_idx ON attendance_entries(updated_by);
+CREATE INDEX attendance_entries_enrollment_idx ON attendance_entries(enrollment_id);
+CREATE INDEX attendance_entries_student_date_idx ON attendance_entries(student_id,attendance_date);
+CREATE TABLE attendance_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ entry_id uuid NOT NULL REFERENCES attendance_entries(id) ON DELETE RESTRICT,
+ previous_status varchar(8) CHECK(previous_status IS NULL OR previous_status IN ('present','absent','late','excused','void')), previous_note varchar(200),
+ new_status varchar(8) NOT NULL CHECK(new_status IN ('present','absent','late','excused','void')),
+ new_note varchar(200), reason varchar(200),
+ changed_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ changed_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(previous_status IS NULL OR (reason IS NOT NULL AND length(trim(reason))>=3))
+);
+CREATE INDEX attendance_audit_entry_idx ON attendance_audit(entry_id,id);
+CREATE INDEX attendance_audit_actor_idx ON attendance_audit(changed_by);
+CREATE FUNCTION validate_attendance_register() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE y academic_years;
+BEGIN
+ IF TG_OP='UPDATE' AND (NEW.section_id,NEW.class_id,NEW.academic_year_id,NEW.attendance_date,NEW.created_by) IS DISTINCT FROM (OLD.section_id,OLD.class_id,OLD.academic_year_id,OLD.attendance_date,OLD.created_by) THEN
+ RAISE EXCEPTION 'Register identity is immutable' USING ERRCODE='23514'; END IF;
+ SELECT * INTO y FROM academic_years WHERE id=NEW.academic_year_id FOR SHARE;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Academic year not found' USING ERRCODE='23503'; END IF;
+ IF NEW.attendance_date<y.start_date OR NEW.attendance_date>y.end_date THEN RAISE EXCEPTION 'Attendance date must fit academic year' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER attendance_registers_validate BEFORE INSERT OR UPDATE ON attendance_registers FOR EACH ROW EXECUTE FUNCTION validate_attendance_register();
+CREATE FUNCTION validate_attendance_entry() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE placement enrollments; reg attendance_registers;
+BEGIN
+ IF TG_OP='UPDATE' THEN
+ IF (NEW.register_id,NEW.student_id,NEW.enrollment_id,NEW.attendance_date) IS DISTINCT FROM (OLD.register_id,OLD.student_id,OLD.enrollment_id,OLD.attendance_date) THEN RAISE EXCEPTION 'Attendance identity is immutable' USING ERRCODE='23514'; END IF;
+ IF (NEW.status,NEW.note) IS DISTINCT FROM (OLD.status,OLD.note) AND (NEW.change_reason IS NULL OR length(trim(NEW.change_reason))<3) THEN RAISE EXCEPTION 'Correction reason required' USING ERRCODE='23514'; END IF;
+ ELSE
+ IF NEW.status='void' THEN RAISE EXCEPTION 'Only existing attendance can be voided' USING ERRCODE='23514'; END IF;
+ SELECT * INTO placement FROM enrollments WHERE id=NEW.enrollment_id FOR SHARE;
+ SELECT * INTO reg FROM attendance_registers WHERE id=NEW.register_id;
+ IF placement.id IS NULL OR reg.id IS NULL OR placement.student_id<>NEW.student_id OR placement.section_id<>reg.section_id OR placement.academic_year_id<>reg.academic_year_id OR placement.status<>'active' OR placement.enrolled_on>NEW.attendance_date THEN
+ RAISE EXCEPTION 'Student must have an eligible active enrollment' USING ERRCODE='23514'; END IF;
+ END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER attendance_entries_validate BEFORE INSERT OR UPDATE ON attendance_entries FOR EACH ROW EXECUTE FUNCTION validate_attendance_entry();
+CREATE FUNCTION audit_attendance_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+ INSERT INTO attendance_audit(entry_id,new_status,new_note,changed_by) VALUES(NEW.id,NEW.status,NEW.note,NEW.updated_by);
+ ELSIF (NEW.status,NEW.note) IS DISTINCT FROM (OLD.status,OLD.note) THEN
+ INSERT INTO attendance_audit(entry_id,previous_status,previous_note,new_status,new_note,reason,changed_by) VALUES(NEW.id,OLD.status,OLD.note,NEW.status,NEW.note,NEW.change_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER attendance_entries_audit AFTER INSERT OR UPDATE ON attendance_entries FOR EACH ROW EXECUTE FUNCTION audit_attendance_change();
+CREATE FUNCTION protect_attendance_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Attendance audit history is append-only' USING ERRCODE='23514'; END; $$;
+CREATE TRIGGER attendance_audit_protect BEFORE UPDATE OR DELETE ON attendance_audit FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE FUNCTION protect_attended_enrollment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM attendance_entries WHERE enrollment_id=NEW.id AND (attendance_date<NEW.enrolled_on OR student_id<>NEW.student_id OR NEW.academic_year_id<>OLD.academic_year_id)) THEN RAISE EXCEPTION 'Enrollment date cannot exclude saved attendance' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER enrollments_attendance_guard BEFORE UPDATE ON enrollments FOR EACH ROW EXECUTE FUNCTION protect_attended_enrollment();
+CREATE OR REPLACE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM enrollments WHERE academic_year_id=NEW.id AND (enrolled_on<NEW.start_date OR enrolled_on>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM teacher_assignments a JOIN teachers t ON t.id=a.teacher_id WHERE a.academic_year_id=NEW.id AND t.joining_date>NEW.end_date) OR
+ EXISTS(SELECT 1 FROM attendance_registers WHERE academic_year_id=NEW.id AND (attendance_date<NEW.start_date OR attendance_date>NEW.end_date)) THEN
+ RAISE EXCEPTION 'Existing academic records must fit academic year' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 006_fees.sql
+-- ============================================================================
+CREATE TABLE fee_structures (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ class_id uuid NOT NULL, academic_year_id uuid NOT NULL,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ currency char(3) NOT NULL DEFAULT 'INR' CHECK(currency IN ('INR','USD','EUR','GBP')),
+ active boolean NOT NULL DEFAULT true,
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX fee_structures_name_unique ON fee_structures(class_id,lower(name));
+CREATE INDEX fee_structures_class_year_idx ON fee_structures(class_id,academic_year_id);
+CREATE INDEX fee_structures_year_idx ON fee_structures(academic_year_id);
+CREATE TABLE fee_invoices (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), invoice_number bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ fee_structure_id uuid NOT NULL REFERENCES fee_structures(id) ON DELETE RESTRICT,
+ enrollment_id uuid NOT NULL REFERENCES enrollments(id) ON DELETE RESTRICT,
+ class_id uuid NOT NULL, academic_year_id uuid NOT NULL,
+ title varchar(100) NOT NULL,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ currency char(3) NOT NULL CHECK(currency IN ('INR','USD','EUR','GBP')),
+ issued_on date NOT NULL CHECK(issued_on<=CURRENT_DATE), due_on date NOT NULL CHECK(due_on>=issued_on),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ voided_at timestamptz, void_reason varchar(200), voided_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+ CHECK((voided_at IS NULL AND void_reason IS NULL AND voided_by IS NULL) OR (voided_at IS NOT NULL AND voided_by IS NOT NULL AND void_reason IS NOT NULL AND length(trim(void_reason))>=3)),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX fee_invoices_student_structure_unique ON fee_invoices(student_id,fee_structure_id) WHERE voided_at IS NULL;
+CREATE INDEX fee_invoices_student_idx ON fee_invoices(student_id);
+CREATE INDEX fee_invoices_structure_idx ON fee_invoices(fee_structure_id);
+CREATE INDEX fee_invoices_enrollment_idx ON fee_invoices(enrollment_id);
+CREATE INDEX fee_invoices_class_year_idx ON fee_invoices(class_id,academic_year_id);
+CREATE INDEX fee_invoices_year_due_idx ON fee_invoices(academic_year_id,due_on);
+CREATE INDEX fee_invoices_creator_idx ON fee_invoices(created_by);
+CREATE INDEX fee_invoices_void_actor_idx ON fee_invoices(voided_by);
+CREATE TABLE fee_payments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), receipt_number bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ paid_on date NOT NULL CHECK(paid_on<=CURRENT_DATE),
+ method varchar(20) NOT NULL CHECK(method IN ('cash','bank_transfer','cheque','other')),
+ reference varchar(80), idempotency_key uuid NOT NULL UNIQUE,
+ recorded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ recorded_at timestamptz NOT NULL DEFAULT now(),
+ reversed_at timestamptz, reversal_reason varchar(200), reversed_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+ UNIQUE(id,invoice_id),
+ CHECK((reversed_at IS NULL AND reversal_reason IS NULL AND reversed_by IS NULL) OR (reversed_at IS NOT NULL AND reversal_reason IS NOT NULL AND length(trim(reversal_reason))>=3 AND reversed_by IS NOT NULL))
+);
+CREATE INDEX fee_payments_invoice_idx ON fee_payments(invoice_id,reversed_at);
+CREATE INDEX fee_payments_actor_idx ON fee_payments(recorded_by);
+CREATE INDEX fee_payments_reverse_actor_idx ON fee_payments(reversed_by);
+CREATE TABLE fee_events (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ payment_id uuid,
+ kind varchar(20) NOT NULL CHECK(kind IN ('invoice_issued','invoice_voided','payment_recorded','payment_reversed')),
+ amount_minor integer NOT NULL CHECK(amount_minor>0),
+ actor_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ reason varchar(200), occurred_at timestamptz NOT NULL DEFAULT now(),
+ CHECK((kind IN ('payment_recorded','payment_reversed'))=(payment_id IS NOT NULL)),
+ CHECK(kind NOT IN ('invoice_voided','payment_reversed') OR (reason IS NOT NULL AND length(trim(reason))>=3)),
+ FOREIGN KEY(payment_id,invoice_id) REFERENCES fee_payments(id,invoice_id) ON DELETE RESTRICT
+);
+CREATE INDEX fee_events_invoice_idx ON fee_events(invoice_id,id);
+CREATE INDEX fee_events_payment_idx ON fee_events(payment_id,invoice_id);
+CREATE INDEX fee_events_actor_idx ON fee_events(actor_id);
+CREATE FUNCTION guard_fee_invoice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE e enrollments; f fee_structures;
+BEGIN
+ IF TG_OP='UPDATE' THEN
+ IF (NEW.id,NEW.invoice_number,NEW.student_id,NEW.fee_structure_id,NEW.enrollment_id,NEW.class_id,NEW.academic_year_id,NEW.title,NEW.amount_minor,NEW.currency,NEW.issued_on,NEW.due_on,NEW.created_by,NEW.created_at) IS DISTINCT FROM (OLD.id,OLD.invoice_number,OLD.student_id,OLD.fee_structure_id,OLD.enrollment_id,OLD.class_id,OLD.academic_year_id,OLD.title,OLD.amount_minor,OLD.currency,OLD.issued_on,OLD.due_on,OLD.created_by,OLD.created_at) OR OLD.voided_at IS NOT NULL THEN
+ RAISE EXCEPTION 'Issued invoices are immutable' USING ERRCODE='23514'; END IF;
+ IF EXISTS(SELECT 1 FROM fee_payments WHERE invoice_id=NEW.id AND reversed_at IS NULL) THEN RAISE EXCEPTION 'Reverse payments before voiding invoice' USING ERRCODE='23514'; END IF;
+ ELSE
+ SELECT * INTO e FROM enrollments WHERE id=NEW.enrollment_id FOR SHARE;
+ SELECT * INTO f FROM fee_structures WHERE id=NEW.fee_structure_id FOR SHARE;
+ IF e.id IS NULL OR f.id IS NULL OR NOT f.active OR e.status<>'active' OR e.student_id<>NEW.student_id OR e.class_id<>f.class_id OR e.academic_year_id<>f.academic_year_id OR NEW.class_id<>f.class_id OR NEW.academic_year_id<>f.academic_year_id OR NEW.title<>f.name OR NEW.currency<>f.currency OR NEW.amount_minor<>f.amount_minor OR NEW.issued_on<e.enrolled_on OR NEW.voided_at IS NOT NULL THEN
+ RAISE EXCEPTION 'Invoice must snapshot an active matching fee structure and enrollment' USING ERRCODE='23514'; END IF;
+ END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_invoices_guard BEFORE INSERT OR UPDATE ON fee_invoices FOR EACH ROW EXECUTE FUNCTION guard_fee_invoice();
+CREATE FUNCTION guard_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE inv fee_invoices; paid bigint;
+BEGIN
+ SELECT * INTO inv FROM fee_invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF inv.id IS NULL THEN RAISE EXCEPTION 'Invoice not found' USING ERRCODE='23503'; END IF;
+ IF TG_OP='UPDATE' THEN
+ IF (NEW.id,NEW.receipt_number,NEW.invoice_id,NEW.amount_minor,NEW.paid_on,NEW.method,NEW.reference,NEW.idempotency_key,NEW.recorded_by,NEW.recorded_at) IS DISTINCT FROM (OLD.id,OLD.receipt_number,OLD.invoice_id,OLD.amount_minor,OLD.paid_on,OLD.method,OLD.reference,OLD.idempotency_key,OLD.recorded_by,OLD.recorded_at) OR OLD.reversed_at IS NOT NULL OR NEW.reversed_at IS NULL THEN
+ RAISE EXCEPTION 'Payments can only be reversed once' USING ERRCODE='23514'; END IF;
+ ELSE
+ SELECT coalesce(sum(amount_minor),0) INTO paid FROM fee_payments WHERE invoice_id=NEW.invoice_id AND reversed_at IS NULL;
+ IF inv.voided_at IS NOT NULL OR NEW.paid_on<inv.issued_on OR NEW.amount_minor>inv.amount_minor-paid OR NEW.reversed_at IS NOT NULL THEN
+ RAISE EXCEPTION 'Invalid payment date, void invoice or overpayment' USING ERRCODE='23514'; END IF;
+ END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_payments_guard BEFORE INSERT OR UPDATE ON fee_payments FOR EACH ROW EXECUTE FUNCTION guard_fee_payment();
+CREATE FUNCTION audit_fee_invoice() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO fee_events(invoice_id,kind,amount_minor,actor_id) VALUES(NEW.id,'invoice_issued',NEW.amount_minor,NEW.created_by);
+ ELSE INSERT INTO fee_events(invoice_id,kind,amount_minor,actor_id,reason) VALUES(NEW.id,'invoice_voided',NEW.amount_minor,NEW.voided_by,NEW.void_reason); END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_invoices_audit AFTER INSERT OR UPDATE ON fee_invoices FOR EACH ROW EXECUTE FUNCTION audit_fee_invoice();
+CREATE FUNCTION audit_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO fee_events(invoice_id,payment_id,kind,amount_minor,actor_id) VALUES(NEW.invoice_id,NEW.id,'payment_recorded',NEW.amount_minor,NEW.recorded_by);
+ ELSE INSERT INTO fee_events(invoice_id,payment_id,kind,amount_minor,actor_id,reason) VALUES(NEW.invoice_id,NEW.id,'payment_reversed',NEW.amount_minor,NEW.reversed_by,NEW.reversal_reason); END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_payments_audit AFTER INSERT OR UPDATE ON fee_payments FOR EACH ROW EXECUTE FUNCTION audit_fee_payment();
+CREATE FUNCTION protect_fee_events() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Fee audit history is append-only' USING ERRCODE='23514'; END; $$;
+CREATE TRIGGER fee_events_protect BEFORE UPDATE OR DELETE ON fee_events FOR EACH ROW EXECUTE FUNCTION protect_fee_events();
+CREATE FUNCTION protect_billed_enrollment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM fee_invoices WHERE enrollment_id=NEW.id AND (student_id<>NEW.student_id OR academic_year_id<>NEW.academic_year_id OR issued_on<NEW.enrolled_on)) THEN
+ RAISE EXCEPTION 'Enrollment change conflicts with issued invoice' USING ERRCODE='23514'; END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER enrollments_fee_guard BEFORE UPDATE ON enrollments FOR EACH ROW EXECUTE FUNCTION protect_billed_enrollment();
+
+-- ============================================================================
+-- 007_exams.sql
+-- ============================================================================
+ALTER TABLE terms ADD CONSTRAINT terms_id_year_unique UNIQUE(id,academic_year_id);
+CREATE TABLE exam_grading_scales (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(100) NOT NULL CHECK(length(trim(name))>0)
+);
+CREATE UNIQUE INDEX exam_grading_scales_name_unique ON exam_grading_scales(lower(name));
+CREATE TABLE exam_grade_bands (
+ scale_id uuid NOT NULL REFERENCES exam_grading_scales(id) ON DELETE RESTRICT,
+ minimum_percent integer NOT NULL CHECK(minimum_percent BETWEEN 0 AND 100),
+ label varchar(5) NOT NULL CHECK(label ~ '^[A-Z0-9+-]{1,5}$'),
+ PRIMARY KEY(scale_id,minimum_percent), UNIQUE(scale_id,label)
+);
+INSERT INTO exam_grading_scales(id,name) VALUES('00000000-0000-4000-8000-000000000007','Default A–F');
+INSERT INTO exam_grade_bands(scale_id,minimum_percent,label) VALUES
+ ('00000000-0000-4000-8000-000000000007',90,'A'),('00000000-0000-4000-8000-000000000007',80,'B'),
+ ('00000000-0000-4000-8000-000000000007',70,'C'),('00000000-0000-4000-8000-000000000007',60,'D'),
+ ('00000000-0000-4000-8000-000000000007',50,'E'),('00000000-0000-4000-8000-000000000007',0,'F');
+CREATE TABLE exams (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(), class_id uuid NOT NULL,academic_year_id uuid NOT NULL,
+ term_id uuid, grading_scale_id uuid NOT NULL REFERENCES exam_grading_scales(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),start_date date NOT NULL,end_date date NOT NULL CHECK(end_date>=start_date),
+ status varchar(10) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','cancelled')),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ updated_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ action_reason varchar(200),created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(id,class_id),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT,
+ FOREIGN KEY(term_id,academic_year_id) REFERENCES terms(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX exams_name_unique ON exams(class_id,lower(name)) WHERE status<>'cancelled';
+CREATE INDEX exams_class_year_idx ON exams(class_id,academic_year_id);
+CREATE INDEX exams_year_idx ON exams(academic_year_id);
+CREATE INDEX exams_term_idx ON exams(term_id,academic_year_id);
+CREATE INDEX exams_scale_idx ON exams(grading_scale_id);
+CREATE INDEX exams_creator_idx ON exams(created_by);
+CREATE INDEX exams_updater_idx ON exams(updated_by);
+CREATE TABLE exam_candidates (
+ exam_id uuid NOT NULL,student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ enrollment_id uuid NOT NULL REFERENCES enrollments(id) ON DELETE RESTRICT,
+ section_id uuid NOT NULL,class_id uuid NOT NULL,
+ PRIMARY KEY(exam_id,student_id),
+ FOREIGN KEY(exam_id,class_id) REFERENCES exams(id,class_id) ON DELETE RESTRICT,
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT
+);
+CREATE INDEX exam_candidates_student_idx ON exam_candidates(student_id,exam_id);
+CREATE INDEX exam_candidates_enrollment_idx ON exam_candidates(enrollment_id);
+CREATE INDEX exam_candidates_section_idx ON exam_candidates(section_id,class_id);
+CREATE TABLE exam_papers (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),exam_id uuid NOT NULL REFERENCES exams(id) ON DELETE RESTRICT,
+ subject_id uuid NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
+ held_on date NOT NULL,max_marks integer NOT NULL CHECK(max_marks BETWEEN 1 AND 1000),
+ pass_marks integer NOT NULL CHECK(pass_marks BETWEEN 0 AND max_marks),version integer NOT NULL DEFAULT 0 CHECK(version>=0),
+ UNIQUE(exam_id,subject_id),UNIQUE(id,exam_id)
+);
+CREATE INDEX exam_papers_subject_idx ON exam_papers(subject_id);
+CREATE TABLE exam_marks (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),exam_id uuid NOT NULL,paper_id uuid NOT NULL,student_id uuid NOT NULL,
+ outcome varchar(8) NOT NULL CHECK(outcome IN ('scored','absent','exempt')),
+ score integer CHECK(score>=0),remark varchar(200),change_reason varchar(200),
+ updated_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(paper_id,student_id),
+ CHECK((outcome='scored' AND score IS NOT NULL) OR (outcome<>'scored' AND score IS NULL)),
+ CHECK(outcome<>'exempt' OR (remark IS NOT NULL AND length(trim(remark))>=3)),
+ FOREIGN KEY(paper_id,exam_id) REFERENCES exam_papers(id,exam_id) ON DELETE RESTRICT,
+ FOREIGN KEY(exam_id,student_id) REFERENCES exam_candidates(exam_id,student_id) ON DELETE RESTRICT
+);
+CREATE INDEX exam_marks_candidate_idx ON exam_marks(exam_id,student_id);
+CREATE INDEX exam_marks_actor_idx ON exam_marks(updated_by);
+CREATE TABLE exam_mark_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,mark_id uuid NOT NULL REFERENCES exam_marks(id) ON DELETE RESTRICT,
+ previous_outcome varchar(8) CHECK(previous_outcome IS NULL OR previous_outcome IN ('scored','absent','exempt')),previous_score integer CHECK(previous_score>=0),previous_remark varchar(200),
+ new_outcome varchar(8) NOT NULL CHECK(new_outcome IN ('scored','absent','exempt')),new_score integer CHECK(new_score>=0),new_remark varchar(200),
+ reason varchar(200),changed_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,changed_at timestamptz NOT NULL DEFAULT now(),
+ CHECK((new_outcome='scored' AND new_score IS NOT NULL) OR (new_outcome<>'scored' AND new_score IS NULL)),
+ CHECK(previous_outcome IS NULL OR (reason IS NOT NULL AND length(trim(reason))>=3))
+);
+CREATE INDEX exam_mark_audit_mark_idx ON exam_mark_audit(mark_id,id);
+CREATE INDEX exam_mark_audit_actor_idx ON exam_mark_audit(changed_by);
+CREATE TABLE exam_events (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,exam_id uuid NOT NULL REFERENCES exams(id) ON DELETE RESTRICT,
+ action varchar(12) NOT NULL CHECK(action IN ('created','published','reopened','cancelled')),
+ reason varchar(200),actor_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,occurred_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(action NOT IN ('reopened','cancelled') OR (reason IS NOT NULL AND length(trim(reason))>=3))
+);
+CREATE INDEX exam_events_exam_idx ON exam_events(exam_id,id);
+CREATE INDEX exam_events_actor_idx ON exam_events(actor_id);
+CREATE FUNCTION guard_exam() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE y academic_years;t terms;
+BEGIN
+ IF TG_OP='INSERT' THEN
+ SELECT * INTO y FROM academic_years WHERE id=NEW.academic_year_id FOR SHARE;
+ SELECT * INTO t FROM terms WHERE id=NEW.term_id FOR SHARE;
+ PERFORM id FROM exam_grading_scales WHERE id=NEW.grading_scale_id FOR SHARE;
+ IF NEW.status<>'draft' OR NOT EXISTS(SELECT 1 FROM exam_grade_bands WHERE scale_id=NEW.grading_scale_id AND minimum_percent=0) THEN RAISE EXCEPTION 'Exam needs a complete grading scale and draft state' USING ERRCODE='23514'; END IF;
+ IF y.id IS NULL OR NEW.start_date<y.start_date OR NEW.end_date>y.end_date OR (NEW.term_id IS NOT NULL AND (t.id IS NULL OR t.academic_year_id<>NEW.academic_year_id OR NEW.start_date<t.start_date OR NEW.end_date>t.end_date)) THEN RAISE EXCEPTION 'Exam dates must fit year and optional term' USING ERRCODE='23514'; END IF;
+ ELSE
+ IF (NEW.id,NEW.class_id,NEW.academic_year_id,NEW.term_id,NEW.grading_scale_id,NEW.name,NEW.start_date,NEW.end_date,NEW.created_by,NEW.created_at) IS DISTINCT FROM (OLD.id,OLD.class_id,OLD.academic_year_id,OLD.term_id,OLD.grading_scale_id,OLD.name,OLD.start_date,OLD.end_date,OLD.created_by,OLD.created_at) THEN RAISE EXCEPTION 'Exam setup is immutable; cancel and replace an incorrect exam' USING ERRCODE='23514'; END IF;
+ IF OLD.status='draft' AND NEW.status='published' THEN
+ IF NEW.end_date>CURRENT_DATE OR NOT EXISTS(SELECT 1 FROM exam_candidates WHERE exam_id=NEW.id) OR NOT EXISTS(SELECT 1 FROM exam_papers WHERE exam_id=NEW.id) OR EXISTS(SELECT 1 FROM exam_candidates c CROSS JOIN exam_papers p WHERE c.exam_id=NEW.id AND p.exam_id=NEW.id AND NOT EXISTS(SELECT 1 FROM exam_marks m WHERE m.paper_id=p.id AND m.student_id=c.student_id)) THEN RAISE EXCEPTION 'Finish the exam and mark every candidate/paper before publication' USING ERRCODE='23514'; END IF;
+ ELSIF (OLD.status='published' AND NEW.status='draft') OR (OLD.status='draft' AND NEW.status='cancelled') THEN
+ IF NEW.action_reason IS NULL OR length(trim(NEW.action_reason))<3 THEN RAISE EXCEPTION 'Action reason required' USING ERRCODE='23514'; END IF;
+ ELSE RAISE EXCEPTION 'Invalid exam state transition' USING ERRCODE='23514'; END IF;
+ END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER exams_guard BEFORE INSERT OR UPDATE ON exams FOR EACH ROW EXECUTE FUNCTION guard_exam();
+CREATE FUNCTION guard_exam_scale() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE sid uuid;
+BEGIN
+ IF TG_OP='DELETE' THEN sid=OLD.scale_id; ELSE sid=NEW.scale_id; END IF;
+ PERFORM id FROM exam_grading_scales WHERE id=sid FOR UPDATE;
+ IF EXISTS(SELECT 1 FROM exams WHERE grading_scale_id=sid) OR (TG_OP='UPDATE' AND NEW.scale_id<>OLD.scale_id) THEN RAISE EXCEPTION 'Referenced grading rules are immutable' USING ERRCODE='23514'; END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER exam_grade_bands_guard BEFORE INSERT OR UPDATE OR DELETE ON exam_grade_bands FOR EACH ROW EXECUTE FUNCTION guard_exam_scale();
+CREATE FUNCTION guard_exam_candidate() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE ex exams;en enrollments;
+BEGIN
+ IF TG_OP='DELETE' THEN SELECT * INTO ex FROM exams WHERE id=OLD.exam_id FOR SHARE; ELSE SELECT * INTO ex FROM exams WHERE id=NEW.exam_id FOR SHARE; END IF;
+ IF ex.status<>'draft' THEN RAISE EXCEPTION 'Candidates can change only in draft exams' USING ERRCODE='23514'; END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ IF TG_OP='UPDATE' THEN RAISE EXCEPTION 'Candidate identity is immutable' USING ERRCODE='23514'; END IF;
+ SELECT * INTO en FROM enrollments WHERE id=NEW.enrollment_id FOR SHARE;
+ IF en.id IS NULL OR en.student_id<>NEW.student_id OR en.class_id<>ex.class_id OR en.academic_year_id<>ex.academic_year_id OR en.section_id<>NEW.section_id OR NEW.class_id<>ex.class_id OR en.status<>'active' OR en.enrolled_on>ex.start_date THEN RAISE EXCEPTION 'Candidate needs a matching active enrollment before exam start' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER exam_candidates_guard BEFORE INSERT OR UPDATE OR DELETE ON exam_candidates FOR EACH ROW EXECUTE FUNCTION guard_exam_candidate();
+CREATE FUNCTION guard_exam_paper() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE ex exams;
+BEGIN
+ IF TG_OP='DELETE' THEN SELECT * INTO ex FROM exams WHERE id=OLD.exam_id FOR SHARE; ELSE SELECT * INTO ex FROM exams WHERE id=NEW.exam_id FOR SHARE; END IF;
+ IF ex.status<>'draft' THEN RAISE EXCEPTION 'Paper can change only in draft exam' USING ERRCODE='23514'; END IF;
+ IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+ IF NEW.held_on<ex.start_date OR NEW.held_on>ex.end_date THEN RAISE EXCEPTION 'Paper date must fit exam' USING ERRCODE='23514'; END IF;
+ IF TG_OP='UPDATE' AND ((NEW.id,NEW.exam_id) IS DISTINCT FROM (OLD.id,OLD.exam_id) OR ((NEW.subject_id,NEW.held_on,NEW.max_marks,NEW.pass_marks) IS DISTINCT FROM (OLD.subject_id,OLD.held_on,OLD.max_marks,OLD.pass_marks) AND EXISTS(SELECT 1 FROM exam_marks WHERE paper_id=OLD.id))) THEN RAISE EXCEPTION 'Marked paper setup is immutable' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER exam_papers_guard BEFORE INSERT OR UPDATE OR DELETE ON exam_papers FOR EACH ROW EXECUTE FUNCTION guard_exam_paper();
+CREATE FUNCTION guard_exam_mark() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE ex exams;p exam_papers;
+BEGIN
+ SELECT * INTO ex FROM exams WHERE id=NEW.exam_id FOR SHARE;
+ SELECT * INTO p FROM exam_papers WHERE id=NEW.paper_id;
+ IF ex.status<>'draft' OR p.exam_id<>NEW.exam_id OR p.held_on>CURRENT_DATE OR NEW.score>p.max_marks THEN RAISE EXCEPTION 'Invalid score, future paper or closed exam' USING ERRCODE='23514'; END IF;
+ IF TG_OP='UPDATE' THEN
+ IF (NEW.id,NEW.exam_id,NEW.paper_id,NEW.student_id) IS DISTINCT FROM (OLD.id,OLD.exam_id,OLD.paper_id,OLD.student_id) THEN RAISE EXCEPTION 'Mark identity is immutable' USING ERRCODE='23514'; END IF;
+ IF (NEW.outcome,NEW.score,NEW.remark) IS DISTINCT FROM (OLD.outcome,OLD.score,OLD.remark) AND (NEW.change_reason IS NULL OR length(trim(NEW.change_reason))<3) THEN RAISE EXCEPTION 'Mark correction reason required' USING ERRCODE='23514'; END IF;
+ END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER exam_marks_guard BEFORE INSERT OR UPDATE ON exam_marks FOR EACH ROW EXECUTE FUNCTION guard_exam_mark();
+CREATE FUNCTION audit_exam_mark() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO exam_mark_audit(mark_id,new_outcome,new_score,new_remark,changed_by) VALUES(NEW.id,NEW.outcome,NEW.score,NEW.remark,NEW.updated_by);
+ ELSIF (NEW.outcome,NEW.score,NEW.remark) IS DISTINCT FROM (OLD.outcome,OLD.score,OLD.remark) THEN INSERT INTO exam_mark_audit(mark_id,previous_outcome,previous_score,previous_remark,new_outcome,new_score,new_remark,reason,changed_by) VALUES(NEW.id,OLD.outcome,OLD.score,OLD.remark,NEW.outcome,NEW.score,NEW.remark,NEW.change_reason,NEW.updated_by); END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER exam_marks_audit AFTER INSERT OR UPDATE ON exam_marks FOR EACH ROW EXECUTE FUNCTION audit_exam_mark();
+CREATE FUNCTION audit_exam_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO exam_events(exam_id,action,actor_id) VALUES(NEW.id,'created',NEW.created_by);
+ ELSE INSERT INTO exam_events(exam_id,action,reason,actor_id) VALUES(NEW.id,CASE NEW.status WHEN 'published' THEN 'published' WHEN 'cancelled' THEN 'cancelled' ELSE 'reopened' END,NEW.action_reason,NEW.updated_by); END IF; RETURN NEW;
+END; $$;
+CREATE TRIGGER exams_audit AFTER INSERT OR UPDATE ON exams FOR EACH ROW EXECUTE FUNCTION audit_exam_event();
+CREATE TRIGGER exam_mark_audit_protect BEFORE UPDATE OR DELETE ON exam_mark_audit FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE TRIGGER exam_events_protect BEFORE UPDATE OR DELETE ON exam_events FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE FUNCTION protect_exam_enrollment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM exam_candidates c JOIN exams e ON e.id=c.exam_id WHERE c.enrollment_id=NEW.id AND (c.student_id<>NEW.student_id OR e.academic_year_id<>NEW.academic_year_id OR NEW.enrolled_on>e.start_date)) THEN RAISE EXCEPTION 'Enrollment change conflicts with registered exam candidate' USING ERRCODE='23514'; END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER enrollments_exam_guard BEFORE UPDATE ON enrollments FOR EACH ROW EXECUTE FUNCTION protect_exam_enrollment();
+CREATE FUNCTION protect_exam_term() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM exams WHERE term_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) THEN RAISE EXCEPTION 'Term dates must contain existing exams' USING ERRCODE='23514'; END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER terms_exam_guard BEFORE UPDATE ON terms FOR EACH ROW EXECUTE FUNCTION protect_exam_term();
+CREATE OR REPLACE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM enrollments WHERE academic_year_id=NEW.id AND (enrolled_on<NEW.start_date OR enrolled_on>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM teacher_assignments a JOIN teachers t ON t.id=a.teacher_id WHERE a.academic_year_id=NEW.id AND t.joining_date>NEW.end_date) OR
+ EXISTS(SELECT 1 FROM attendance_registers WHERE academic_year_id=NEW.id AND (attendance_date<NEW.start_date OR attendance_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM exams WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) THEN RAISE EXCEPTION 'Existing academic records must fit year' USING ERRCODE='23514'; END IF;RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 008_timetable.sql
+-- ============================================================================
+CREATE TABLE school_rooms (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ location varchar(200),active boolean NOT NULL DEFAULT true,version integer NOT NULL DEFAULT 1 CHECK(version>0)
+);
+CREATE UNIQUE INDEX school_rooms_name_unique ON school_rooms(lower(name));
+CREATE TABLE timetable_slots (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),section_id uuid NOT NULL,class_id uuid NOT NULL,academic_year_id uuid NOT NULL,
+ assignment_id uuid REFERENCES teacher_assignments(id) ON DELETE SET NULL,
+ teacher_id uuid NOT NULL REFERENCES teachers(id) ON DELETE RESTRICT,
+ subject_id uuid NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
+ room_id uuid REFERENCES school_rooms(id) ON DELETE RESTRICT,
+ weekday integer NOT NULL CHECK(weekday BETWEEN 1 AND 7),
+ start_minute integer NOT NULL CHECK(start_minute BETWEEN 0 AND 1439),
+ end_minute integer NOT NULL CHECK(end_minute BETWEEN 1 AND 1440 AND end_minute>start_minute),
+ effective_from date NOT NULL,effective_to date NOT NULL CHECK(effective_to>=effective_from),
+ active boolean NOT NULL DEFAULT true,version integer NOT NULL DEFAULT 1 CHECK(version>0),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ changed_by uuid REFERENCES users(id) ON DELETE RESTRICT,change_note varchar(200),
+ created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(NOT active OR assignment_id IS NOT NULL),
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT,
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE INDEX timetable_slots_section_idx ON timetable_slots(section_id,weekday,effective_from,effective_to) WHERE active;
+CREATE INDEX timetable_slots_teacher_idx ON timetable_slots(teacher_id,weekday,effective_from,effective_to) WHERE active;
+CREATE INDEX timetable_slots_room_idx ON timetable_slots(room_id,weekday,effective_from,effective_to) WHERE active AND room_id IS NOT NULL;
+CREATE INDEX timetable_slots_section_fk_idx ON timetable_slots(section_id,class_id);
+CREATE INDEX timetable_slots_class_year_idx ON timetable_slots(class_id,academic_year_id);
+CREATE INDEX timetable_slots_year_idx ON timetable_slots(academic_year_id);
+CREATE INDEX timetable_slots_assignment_idx ON timetable_slots(assignment_id);
+CREATE INDEX timetable_slots_teacher_fk_idx ON timetable_slots(teacher_id);
+CREATE INDEX timetable_slots_subject_idx ON timetable_slots(subject_id);
+CREATE INDEX timetable_slots_room_fk_idx ON timetable_slots(room_id);
+CREATE INDEX timetable_slots_creator_idx ON timetable_slots(created_by);
+CREATE INDEX timetable_slots_actor_idx ON timetable_slots(changed_by);
+CREATE TABLE timetable_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,slot_id uuid NOT NULL REFERENCES timetable_slots(id) ON DELETE RESTRICT,
+ action varchar(12) NOT NULL CHECK(action IN ('created','updated','deactivated','reactivated','detached')),
+ previous_values jsonb,new_values jsonb NOT NULL,
+ actor_id uuid REFERENCES users(id) ON DELETE RESTRICT,note varchar(200),occurred_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX timetable_audit_slot_idx ON timetable_audit(slot_id,id);
+CREATE INDEX timetable_audit_actor_idx ON timetable_audit(actor_id);
+CREATE FUNCTION timetable_first_weekday(day date,w integer) RETURNS date LANGUAGE sql IMMUTABLE STRICT AS $$ SELECT day+((w-extract(isodow FROM day)::integer+7)%7); $$;
+CREATE FUNCTION guard_timetable_slot() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE exyear academic_years;assignment teacher_assignments;emp teachers;account_active boolean;room_active boolean;lock_key text;
+BEGIN
+ IF TG_OP='UPDATE' THEN
+ IF (NEW.id,NEW.created_by,NEW.created_at) IS DISTINCT FROM (OLD.id,OLD.created_by,OLD.created_at) THEN RAISE EXCEPTION 'Slot identity is immutable' USING ERRCODE='23514'; END IF;
+ IF OLD.assignment_id IS NOT NULL AND NEW.assignment_id IS NULL THEN
+ IF OLD.active THEN RAISE EXCEPTION 'Deactivate timetable slots before removing this assignment' USING ERRCODE='23503'; END IF;
+ IF (NEW.section_id,NEW.class_id,NEW.academic_year_id,NEW.teacher_id,NEW.subject_id,NEW.room_id,NEW.weekday,NEW.start_minute,NEW.end_minute,NEW.effective_from,NEW.effective_to,NEW.active) IS DISTINCT FROM (OLD.section_id,OLD.class_id,OLD.academic_year_id,OLD.teacher_id,OLD.subject_id,OLD.room_id,OLD.weekday,OLD.start_minute,OLD.end_minute,OLD.effective_from,OLD.effective_to,OLD.active) THEN RAISE EXCEPTION 'Invalid assignment detachment' USING ERRCODE='23514'; END IF;
+ NEW.version=OLD.version+1;NEW.changed_by=NULL;NEW.change_note='Assignment removed; inactive slot detached.';NEW.updated_at=now();RETURN NEW;
+ END IF;
+ IF OLD.active AND NOT NEW.active AND (NEW.change_note IS NULL OR length(trim(NEW.change_note))<3) THEN RAISE EXCEPTION 'Deactivation reason required' USING ERRCODE='23514';END IF;
+ IF NEW.version<>OLD.version+1 THEN RAISE EXCEPTION 'Slot version must increment' USING ERRCODE='23514'; END IF;
+ END IF;
+ IF NEW.changed_by IS NULL THEN RAISE EXCEPTION 'Administrator actor required' USING ERRCODE='23514'; END IF;
+ SELECT * INTO exyear FROM academic_years WHERE id=NEW.academic_year_id FOR SHARE;
+ IF exyear.id IS NULL OR NEW.effective_from<exyear.start_date OR NEW.effective_to>exyear.end_date OR timetable_first_weekday(NEW.effective_from,NEW.weekday)>NEW.effective_to THEN RAISE EXCEPTION 'Slot dates must fit year and contain the selected weekday' USING ERRCODE='23514'; END IF;
+ IF TG_OP='UPDATE' THEN
+ FOR lock_key IN SELECT DISTINCT k FROM unnest(ARRAY['teacher:'||NEW.teacher_id,'section:'||NEW.section_id,'room:'||NEW.room_id,'teacher:'||OLD.teacher_id,'section:'||OLD.section_id,'room:'||OLD.room_id]) k WHERE k IS NOT NULL ORDER BY k LOOP PERFORM pg_advisory_xact_lock(hashtextextended(lock_key,0)); END LOOP;
+ ELSE
+ FOR lock_key IN SELECT DISTINCT k FROM unnest(ARRAY['teacher:'||NEW.teacher_id,'section:'||NEW.section_id,'room:'||NEW.room_id]) k WHERE k IS NOT NULL ORDER BY k LOOP PERFORM pg_advisory_xact_lock(hashtextextended(lock_key,0)); END LOOP;
+ END IF;
+ IF NEW.active THEN
+ SELECT * INTO assignment FROM teacher_assignments WHERE id=NEW.assignment_id FOR SHARE;
+ SELECT * INTO emp FROM teachers WHERE id=NEW.teacher_id FOR SHARE;
+ SELECT active INTO account_active FROM users WHERE id=emp.user_id FOR SHARE;
+ IF assignment.id IS NULL OR assignment.kind<>'subject_teacher' OR assignment.teacher_id<>NEW.teacher_id OR assignment.class_id<>NEW.class_id OR assignment.academic_year_id<>NEW.academic_year_id OR assignment.subject_id<>NEW.subject_id OR emp.employment_status<>'active' OR NOT coalesce(account_active,false) OR emp.joining_date>NEW.effective_from THEN RAISE EXCEPTION 'Choose an active matching subject assignment and employment dates' USING ERRCODE='23514'; END IF;
+ IF NEW.room_id IS NOT NULL THEN SELECT active INTO room_active FROM school_rooms WHERE id=NEW.room_id FOR SHARE;IF NOT coalesce(room_active,false) THEN RAISE EXCEPTION 'Choose an active room' USING ERRCODE='23514'; END IF;END IF;
+ IF EXISTS(SELECT 1 FROM timetable_slots s WHERE s.active AND s.id<>NEW.id AND s.weekday=NEW.weekday AND s.start_minute<NEW.end_minute AND s.end_minute>NEW.start_minute AND (s.section_id=NEW.section_id OR s.teacher_id=NEW.teacher_id OR (NEW.room_id IS NOT NULL AND s.room_id=NEW.room_id)) AND timetable_first_weekday(greatest(s.effective_from,NEW.effective_from),NEW.weekday)<=least(s.effective_to,NEW.effective_to)) THEN RAISE EXCEPTION 'Section, teacher or room is already booked at an overlapping occurrence' USING ERRCODE='23P01'; END IF;
+ END IF;NEW.updated_at=now();RETURN NEW;
+END; $$;
+CREATE TRIGGER timetable_slots_guard BEFORE INSERT OR UPDATE ON timetable_slots FOR EACH ROW EXECUTE FUNCTION guard_timetable_slot();
+CREATE FUNCTION audit_timetable_slot() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event text;
+BEGIN
+ IF TG_OP='INSERT' THEN event='created';INSERT INTO timetable_audit(slot_id,action,new_values,actor_id,note) VALUES(NEW.id,event,to_jsonb(NEW),NEW.changed_by,NEW.change_note);
+ ELSE event=CASE WHEN OLD.assignment_id IS NOT NULL AND NEW.assignment_id IS NULL THEN 'detached' WHEN OLD.active AND NOT NEW.active THEN 'deactivated' WHEN NOT OLD.active AND NEW.active THEN 'reactivated' ELSE 'updated' END;INSERT INTO timetable_audit(slot_id,action,previous_values,new_values,actor_id,note) VALUES(NEW.id,event,to_jsonb(OLD),to_jsonb(NEW),NEW.changed_by,NEW.change_note);END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER timetable_slots_audit AFTER INSERT OR UPDATE ON timetable_slots FOR EACH ROW EXECUTE FUNCTION audit_timetable_slot();
+CREATE TRIGGER timetable_audit_protect BEFORE UPDATE OR DELETE ON timetable_audit FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE FUNCTION guard_timetabled_assignment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF (NEW.teacher_id,NEW.class_id,NEW.academic_year_id,NEW.subject_id,NEW.kind) IS DISTINCT FROM (OLD.teacher_id,OLD.class_id,OLD.academic_year_id,OLD.subject_id,OLD.kind) AND EXISTS(SELECT 1 FROM timetable_slots WHERE assignment_id=OLD.id AND active) THEN RAISE EXCEPTION 'Deactivate timetable slots before changing assignment identity' USING ERRCODE='23503';END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER teacher_assignments_timetable_guard BEFORE UPDATE ON teacher_assignments FOR EACH ROW EXECUTE FUNCTION guard_timetabled_assignment();
+CREATE FUNCTION guard_timetabled_teacher() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM timetable_slots WHERE teacher_id=NEW.id AND active AND effective_from<NEW.joining_date) THEN RAISE EXCEPTION 'Joining date cannot exclude active timetable periods' USING ERRCODE='23514';END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER teachers_timetable_guard BEFORE UPDATE ON teachers FOR EACH ROW EXECUTE FUNCTION guard_timetabled_teacher();
+CREATE OR REPLACE FUNCTION validate_year_dates() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM terms WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM enrollments WHERE academic_year_id=NEW.id AND (enrolled_on<NEW.start_date OR enrolled_on>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM teacher_assignments a JOIN teachers t ON t.id=a.teacher_id WHERE a.academic_year_id=NEW.id AND t.joining_date>NEW.end_date) OR
+ EXISTS(SELECT 1 FROM attendance_registers WHERE academic_year_id=NEW.id AND (attendance_date<NEW.start_date OR attendance_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM exams WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
+ EXISTS(SELECT 1 FROM timetable_slots WHERE academic_year_id=NEW.id AND active AND (effective_from<NEW.start_date OR effective_to>NEW.end_date)) THEN RAISE EXCEPTION 'Existing academic records must fit year' USING ERRCODE='23514';END IF;RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 009_notices.sql
+-- ============================================================================
+CREATE TABLE notices (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ body varchar(5000) NOT NULL CHECK(length(trim(body))>0),
+ audience varchar(10) NOT NULL DEFAULT 'all' CHECK(audience IN ('all','admin','teacher','student','parent')),
+ class_id uuid,academic_year_id uuid,section_id uuid,
+ priority varchar(10) NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','important','urgent')),
+ available_from timestamptz NOT NULL,expires_at timestamptz CHECK(expires_at>available_from),
+ status varchar(10) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
+ version integer NOT NULL DEFAULT 1 CHECK(version>0),content_revision integer NOT NULL DEFAULT 1 CHECK(content_revision>0),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ updated_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ action_reason varchar(200),created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(section_id IS NULL OR class_id IS NOT NULL),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) MATCH FULL ON DELETE RESTRICT,
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT
+);
+CREATE INDEX notices_visible_idx ON notices(status,available_from,expires_at);
+CREATE INDEX notices_class_year_idx ON notices(class_id,academic_year_id);
+CREATE INDEX notices_year_idx ON notices(academic_year_id);
+CREATE INDEX notices_section_idx ON notices(section_id,class_id);
+CREATE INDEX notices_creator_idx ON notices(created_by);
+CREATE INDEX notices_actor_idx ON notices(updated_by);
+CREATE TABLE notice_reads (
+ notice_id uuid NOT NULL REFERENCES notices(id) ON DELETE RESTRICT,
+ user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ content_revision integer NOT NULL CHECK(content_revision>0),read_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(notice_id,user_id,content_revision)
+);
+CREATE INDEX notice_reads_user_idx ON notice_reads(user_id,notice_id,content_revision);
+CREATE TABLE notice_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,notice_id uuid NOT NULL REFERENCES notices(id) ON DELETE RESTRICT,
+ action varchar(12) NOT NULL CHECK(action IN ('created','updated','published','unpublished','archived','restored')),
+ previous_values jsonb,new_values jsonb NOT NULL,
+ actor_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,reason varchar(200),occurred_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX notice_audit_notice_idx ON notice_audit(notice_id,id);
+CREATE INDEX notice_audit_actor_idx ON notice_audit(actor_id);
+CREATE FUNCTION guard_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed boolean;
+BEGIN
+ IF TG_OP='INSERT' THEN
+ IF NEW.status<>'draft' OR NEW.version<>1 OR NEW.content_revision<>1 THEN RAISE EXCEPTION 'Notices start as draft revision one' USING ERRCODE='23514';END IF;
+ ELSE
+ IF (NEW.id,NEW.created_by,NEW.created_at) IS DISTINCT FROM (OLD.id,OLD.created_by,OLD.created_at) OR NEW.version<>OLD.version+1 THEN RAISE EXCEPTION 'Notice identity/version is protected' USING ERRCODE='23514';END IF;
+ changed=(NEW.title,NEW.body,NEW.audience,NEW.class_id,NEW.academic_year_id,NEW.section_id,NEW.priority,NEW.available_from,NEW.expires_at) IS DISTINCT FROM (OLD.title,OLD.body,OLD.audience,OLD.class_id,OLD.academic_year_id,OLD.section_id,OLD.priority,OLD.available_from,OLD.expires_at);
+ IF changed AND (OLD.status<>'draft' OR NEW.status<>'draft') THEN RAISE EXCEPTION 'Unpublish before editing notice content' USING ERRCODE='23514';END IF;
+ IF NEW.content_revision<>OLD.content_revision+(CASE WHEN changed THEN 1 ELSE 0 END) THEN RAISE EXCEPTION 'Content revision must match content change' USING ERRCODE='23514';END IF;
+ IF NEW.status=OLD.status THEN
+ IF OLD.status<>'draft' THEN RAISE EXCEPTION 'Only draft notices can be saved' USING ERRCODE='23514';END IF;
+ ELSIF OLD.status='draft' AND NEW.status='published' THEN
+ IF NEW.expires_at IS NOT NULL AND NEW.expires_at<=CURRENT_TIMESTAMP THEN RAISE EXCEPTION 'Change expired visibility dates before publication' USING ERRCODE='23514';END IF;
+ ELSIF (OLD.status='published' AND NEW.status='draft') OR (OLD.status IN ('draft','published') AND NEW.status='archived') OR (OLD.status='archived' AND NEW.status='draft') THEN
+ IF NEW.action_reason IS NULL OR length(trim(NEW.action_reason))<3 THEN RAISE EXCEPTION 'Lifecycle action reason required' USING ERRCODE='23514';END IF;
+ ELSE RAISE EXCEPTION 'Invalid notice state transition' USING ERRCODE='23514';END IF;
+ END IF;
+ NEW.updated_at=now();RETURN NEW;
+END; $$;
+CREATE TRIGGER notices_guard BEFORE INSERT OR UPDATE ON notices FOR EACH ROW EXECUTE FUNCTION guard_notice();
+CREATE FUNCTION audit_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE action_name text;
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO notice_audit(notice_id,action,new_values,actor_id) VALUES(NEW.id,'created',to_jsonb(NEW),NEW.created_by);
+ ELSE action_name=CASE WHEN NEW.status=OLD.status THEN 'updated' WHEN NEW.status='published' THEN 'published' WHEN NEW.status='archived' THEN 'archived' WHEN OLD.status='archived' THEN 'restored' ELSE 'unpublished' END;INSERT INTO notice_audit(notice_id,action,previous_values,new_values,actor_id,reason) VALUES(NEW.id,action_name,to_jsonb(OLD),to_jsonb(NEW),NEW.updated_by,NEW.action_reason);END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER notices_audit AFTER INSERT OR UPDATE ON notices FOR EACH ROW EXECUTE FUNCTION audit_notice();
+CREATE TRIGGER notice_audit_protect BEFORE UPDATE OR DELETE ON notice_audit FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE TRIGGER notice_reads_protect BEFORE UPDATE OR DELETE ON notice_reads FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE FUNCTION guard_notice_read() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE rev integer;
+BEGIN
+ SELECT content_revision INTO rev FROM notices WHERE id=NEW.notice_id FOR SHARE;
+ IF rev IS NULL OR NEW.content_revision<>rev THEN RAISE EXCEPTION 'Acknowledge only the current notice revision' USING ERRCODE='23514';END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER notice_reads_guard BEFORE INSERT ON notice_reads FOR EACH ROW EXECUTE FUNCTION guard_notice_read();
+
+-- ============================================================================
+-- 010_student_lifecycle.sql
+-- ============================================================================
+ALTER TABLE students
+ ADD COLUMN gender varchar(10) CHECK(gender IN ('female','male','other')),
+ ADD COLUMN blood_group varchar(3) CHECK(blood_group IN ('A+','A-','B+','B-','AB+','AB-','O+','O-')),
+ ADD COLUMN nationality varchar(60),
+ ADD COLUMN present_address varchar(500),
+ ADD COLUMN city varchar(80),
+ ADD COLUMN district varchar(80),
+ ADD COLUMN state varchar(80),
+ ADD COLUMN pin_code varchar(6) CHECK(pin_code ~ '^[0-9]{6}$'),
+ ADD COLUMN previous_school varchar(150),
+ ADD COLUMN previous_class varchar(50),
+ ADD COLUMN lifecycle_status varchar(12) NOT NULL DEFAULT 'active' CHECK(lifecycle_status IN ('active','inactive','transferred','graduated')),
+ ADD COLUMN lifecycle_changed_at timestamptz;
+CREATE INDEX students_lifecycle_idx ON students(lifecycle_status);
+CREATE TABLE student_status_history (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ previous_status varchar(12) NOT NULL CHECK(previous_status IN ('active','inactive','transferred','graduated')),
+ new_status varchar(12) NOT NULL CHECK(new_status IN ('active','inactive','transferred','graduated')),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason))>=3),
+ changed_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ changed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX student_status_history_student_idx ON student_status_history(student_id,id);
+CREATE INDEX student_status_history_actor_idx ON student_status_history(changed_by);
+CREATE FUNCTION protect_student_status_history() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Student status history is append-only' USING ERRCODE='23514'; END; $$;
+CREATE TRIGGER student_status_history_protect BEFORE UPDATE OR DELETE ON student_status_history FOR EACH ROW EXECUTE FUNCTION protect_student_status_history();
+
+-- ============================================================================
+-- 011_staff.sql
+-- ============================================================================
+CREATE TABLE staff_members (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ employee_number varchar(30) NOT NULL UNIQUE CHECK(employee_number ~ '^[A-Z0-9_-]{1,30}$'),
+ name varchar(100) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
+ staff_type varchar(20) NOT NULL CHECK(staff_type IN ('accountant','receptionist','administrative','transport','librarian','attender','security')),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ email varchar(254) CHECK(email IS NULL OR email=lower(email)),
+ address varchar(500),
+ joining_date date NOT NULL CHECK(joining_date<=CURRENT_DATE),
+ employment_status varchar(8) NOT NULL DEFAULT 'active' CHECK(employment_status IN ('active','inactive')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX staff_members_type_status_idx ON staff_members(staff_type,employment_status);
+
+-- ============================================================================
+-- 012_fee_categories.sql
+-- ============================================================================
+ALTER TABLE fee_payments DROP CONSTRAINT fee_payments_method_check;
+ALTER TABLE fee_payments ADD CONSTRAINT fee_payments_method_check CHECK(method IN ('cash','upi','bank_transfer','cheque','online','other'));
+ALTER TABLE fee_structures ADD COLUMN category varchar(20) NOT NULL DEFAULT 'miscellaneous' CHECK(category IN ('admission','tuition','term','examination','transport','books','uniform','activity','miscellaneous'));
+
+-- ============================================================================
+-- 013_attendance_half_day.sql
+-- ============================================================================
+ALTER TABLE attendance_entries DROP CONSTRAINT attendance_entries_status_check;
+ALTER TABLE attendance_entries ADD CONSTRAINT attendance_entries_status_check CHECK(status IN ('present','absent','late','half_day','excused','void'));
+ALTER TABLE attendance_audit DROP CONSTRAINT attendance_audit_previous_status_check;
+ALTER TABLE attendance_audit ADD CONSTRAINT attendance_audit_previous_status_check CHECK(previous_status IS NULL OR previous_status IN ('present','absent','late','half_day','excused','void'));
+ALTER TABLE attendance_audit DROP CONSTRAINT attendance_audit_new_status_check;
+ALTER TABLE attendance_audit ADD CONSTRAINT attendance_audit_new_status_check CHECK(new_status IN ('present','absent','late','half_day','excused','void'));
+
+-- ============================================================================
+-- 014_homework.sql
+-- ============================================================================
+CREATE TABLE homework (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ section_id uuid NOT NULL,
+ class_id uuid NOT NULL,
+ academic_year_id uuid NOT NULL,
+ subject_id uuid NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
+ teacher_id uuid REFERENCES teachers(id) ON DELETE RESTRICT,
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ details varchar(5000) NOT NULL CHECK(length(trim(details))>0),
+ assigned_on date NOT NULL,
+ due_on date NOT NULL,
+ archived_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(due_on>=assigned_on),
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT,
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE INDEX homework_section_due_idx ON homework(section_id,due_on);
+CREATE INDEX homework_class_year_idx ON homework(class_id,academic_year_id);
+CREATE INDEX homework_subject_idx ON homework(subject_id);
+CREATE INDEX homework_teacher_idx ON homework(teacher_id);
+CREATE INDEX homework_creator_idx ON homework(created_by);
+CREATE TABLE homework_completions (
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE RESTRICT,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ completed_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(homework_id,student_id)
+);
+CREATE INDEX homework_completions_student_idx ON homework_completions(student_id);
+
+-- ============================================================================
+-- 015_transport.sql
+-- ============================================================================
+CREATE TABLE transport_vehicles (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ registration_number varchar(20) NOT NULL UNIQUE CHECK(registration_number ~ '^[A-Z0-9 -]{4,20}$'),
+ capacity integer NOT NULL CHECK(capacity BETWEEN 1 AND 200),
+ driver_name varchar(100) CHECK(driver_name IS NULL OR length(trim(driver_name))>0),
+ driver_phone varchar(30) CHECK(driver_phone IS NULL OR driver_phone ~ '^[+0-9() .-]{7,30}$'),
+ insurance_expiry date,
+ permit_expiry date,
+ active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE transport_routes (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ vehicle_id uuid REFERENCES transport_vehicles(id) ON DELETE RESTRICT,
+ active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX transport_routes_name_unique ON transport_routes(lower(name));
+CREATE INDEX transport_routes_vehicle_idx ON transport_routes(vehicle_id);
+CREATE TABLE transport_stops (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ route_id uuid NOT NULL REFERENCES transport_routes(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ sequence integer NOT NULL CHECK(sequence BETWEEN 1 AND 200),
+ UNIQUE(route_id,sequence)
+);
+CREATE TABLE transport_allocations (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ stop_id uuid NOT NULL REFERENCES transport_stops(id) ON DELETE RESTRICT,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(student_id,academic_year_id)
+);
+CREATE INDEX transport_allocations_stop_idx ON transport_allocations(stop_id);
+CREATE INDEX transport_allocations_year_idx ON transport_allocations(academic_year_id);
+CREATE FUNCTION validate_transport_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE vehicle uuid; seats integer; used integer;
+BEGIN
+ SELECT r.vehicle_id INTO vehicle FROM transport_stops s JOIN transport_routes r ON r.id=s.route_id WHERE s.id=NEW.stop_id;
+ IF vehicle IS NULL THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=vehicle FOR UPDATE;
+ SELECT count(*) INTO used FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle AND a.academic_year_id=NEW.academic_year_id AND a.id<>NEW.id;
+ IF used>=seats THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER transport_allocations_validate BEFORE INSERT OR UPDATE ON transport_allocations FOR EACH ROW EXECUTE FUNCTION validate_transport_allocation();
+CREATE FUNCTION check_vehicle_load(vehicle uuid) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle GROUP BY a.academic_year_id HAVING count(*)>(SELECT capacity FROM transport_vehicles WHERE id=vehicle)) THEN
+ RAISE EXCEPTION 'Vehicle capacity is below its allocated students' USING ERRCODE='23514'; END IF;
+END; $$;
+CREATE FUNCTION transport_vehicle_load_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF NEW.vehicle_id IS NOT NULL THEN PERFORM check_vehicle_load(NEW.vehicle_id); END IF; RETURN NEW; END; $$;
+CREATE TRIGGER transport_routes_load AFTER UPDATE OF vehicle_id ON transport_routes FOR EACH ROW EXECUTE FUNCTION transport_vehicle_load_guard();
+CREATE FUNCTION transport_capacity_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM check_vehicle_load(NEW.id); RETURN NEW; END; $$;
+CREATE TRIGGER transport_vehicles_capacity AFTER UPDATE OF capacity ON transport_vehicles FOR EACH ROW EXECUTE FUNCTION transport_capacity_guard();
+
+-- ============================================================================
+-- 016_school_events.sql
+-- ============================================================================
+CREATE TABLE school_events (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ description varchar(1000),
+ event_type varchar(10) NOT NULL CHECK(event_type IN ('holiday','event','exam','meeting')),
+ starts_on date NOT NULL,
+ ends_on date NOT NULL,
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(ends_on>=starts_on)
+);
+CREATE INDEX school_events_dates_idx ON school_events(starts_on,ends_on);
+CREATE INDEX school_events_creator_idx ON school_events(created_by);
+
+-- ============================================================================
+-- 017_transport_capacity_guards.sql
+-- ============================================================================
+CREATE OR REPLACE FUNCTION validate_transport_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE vehicle uuid; seats integer; used integer;
+BEGIN
+ SELECT r.vehicle_id INTO vehicle FROM transport_stops s JOIN transport_routes r ON r.id=s.route_id WHERE s.id=NEW.stop_id FOR SHARE OF r;
+ IF vehicle IS NULL THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=vehicle FOR UPDATE;
+ SELECT count(*) INTO used FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle AND a.academic_year_id=NEW.academic_year_id AND a.id<>NEW.id;
+ IF used>=seats THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+CREATE FUNCTION validate_transport_route_vehicle() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE seats integer;
+BEGIN
+ IF NEW.vehicle_id IS NULL OR NEW.vehicle_id IS NOT DISTINCT FROM OLD.vehicle_id THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=NEW.vehicle_id FOR UPDATE;
+ IF NOT FOUND THEN RETURN NEW; END IF;
+ IF EXISTS(
+  SELECT 1 FROM (
+   SELECT a.academic_year_id FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.vehicle_id AND r.id<>NEW.id
+   UNION
+   SELECT a.academic_year_id FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.id=NEW.id
+  ) years
+  WHERE (SELECT count(*) FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.vehicle_id AND r.id<>NEW.id AND a.academic_year_id=years.academic_year_id)
+   +(SELECT count(*) FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.id=NEW.id AND a.academic_year_id=years.academic_year_id)>seats
+ ) THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+DROP TRIGGER transport_routes_load ON transport_routes;
+CREATE TRIGGER transport_routes_load BEFORE UPDATE OF vehicle_id ON transport_routes FOR EACH ROW EXECUTE FUNCTION validate_transport_route_vehicle();
+
+CREATE FUNCTION validate_transport_vehicle_capacity() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=NEW.id GROUP BY a.academic_year_id HAVING count(*)>NEW.capacity) THEN
+  RAISE EXCEPTION 'Vehicle capacity is below its allocated students' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+DROP TRIGGER transport_vehicles_capacity ON transport_vehicles;
+CREATE TRIGGER transport_vehicles_capacity BEFORE UPDATE OF capacity ON transport_vehicles FOR EACH ROW EXECUTE FUNCTION validate_transport_vehicle_capacity();
+
+-- ============================================================================
+-- 018_multi_tenant_foundation.sql
+-- ============================================================================
+-- Multi-tenant foundation.
+-- Existing rows are assigned to one initial school. Application-level tenant
+-- enforcement and tenant-aware composite foreign keys are introduced in follow-up work.
+
+CREATE TABLE schools (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name varchar(150) NOT NULL
+        CHECK (length(trim(name)) BETWEEN 1 AND 150),
+    slug varchar(80) NOT NULL UNIQUE
+        CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    status varchar(12) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended', 'archived')),
+    timezone varchar(60) NOT NULL DEFAULT 'Asia/Kolkata',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE school_memberships (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    school_id uuid NOT NULL REFERENCES schools(id) ON DELETE RESTRICT,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role varchar(10) NOT NULL
+        CHECK (role IN ('admin', 'teacher', 'student', 'parent')),
+    status varchar(10) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'inactive', 'suspended')),
+    is_default boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, school_id),
+    UNIQUE (id, school_id)
+);
+
+CREATE UNIQUE INDEX school_memberships_one_default_per_user
+    ON school_memberships(user_id)
+    WHERE is_default = true;
+
+CREATE INDEX school_memberships_school_role_idx
+    ON school_memberships(school_id, role, status);
+
+CREATE INDEX school_memberships_user_status_idx
+    ON school_memberships(user_id, status);
+
+-- Create the initial tenant. Rename this school after migration using real
+-- school details; do not create a second tenant until API isolation is complete.
+INSERT INTO schools (name, slug)
+VALUES ('Existing School', 'existing-school');
+
+-- Preserve every existing account and its current role as a membership.
+INSERT INTO school_memberships (
+    school_id, user_id, role, status, is_default
+)
+SELECT
+    (SELECT id FROM schools WHERE slug = 'existing-school'),
+    id,
+    role,
+    CASE WHEN active THEN 'active' ELSE 'inactive' END,
+    true
+FROM users;
+
+-- Scope all current school-owned tables to the initial tenant.
+DO $$
+DECLARE
+    table_name text;
+    first_school_id uuid;
+    tenant_tables text[] := ARRAY[
+        'academic_years', 'terms', 'classes', 'sections', 'subjects',
+        'students', 'parents', 'student_parents', 'enrollments',
+        'teachers', 'teacher_assignments',
+        'attendance_registers', 'attendance_entries', 'attendance_audit',
+        'fee_structures', 'fee_invoices', 'fee_payments', 'fee_events',
+        'exam_grading_scales', 'exam_grade_bands', 'exams',
+        'exam_candidates', 'exam_papers', 'exam_marks', 'exam_mark_audit',
+        'exam_events', 'school_rooms', 'timetable_slots', 'timetable_audit',
+        'notices', 'notice_reads', 'notice_audit',
+        'student_status_history', 'staff_members', 'homework',
+        'homework_completions', 'transport_vehicles', 'transport_routes',
+        'transport_stops', 'transport_allocations', 'school_events'
+    ];
+BEGIN
+    SELECT id INTO STRICT first_school_id
+    FROM schools
+    WHERE slug = 'existing-school';
+
+    FOREACH table_name IN ARRAY tenant_tables LOOP
+        EXECUTE format(
+            'ALTER TABLE %I ADD COLUMN school_id uuid',
+            table_name
+        );
+
+        EXECUTE format(
+            'UPDATE %I SET school_id = $1 WHERE school_id IS NULL',
+            table_name
+        ) USING first_school_id;
+
+        EXECUTE format(
+            'ALTER TABLE %I ALTER COLUMN school_id SET NOT NULL',
+            table_name
+        );
+
+        EXECUTE format(
+            'ALTER TABLE %I ADD CONSTRAINT %I
+             FOREIGN KEY (school_id) REFERENCES schools(id)
+             ON DELETE RESTRICT',
+            table_name,
+            table_name || '_school_id_fkey'
+        );
+
+        EXECUTE format(
+            'CREATE INDEX %I ON %I (school_id)',
+            table_name || '_school_id_idx',
+            table_name
+        );
+    END LOOP;
+END $$;
+
+-- Bind each existing authenticated session to the user's initial-school
+-- membership. The next auth change will resolve this context on every request.
+ALTER TABLE auth_sessions
+    ADD COLUMN active_school_id uuid;
+
+UPDATE auth_sessions
+SET active_school_id = (
+    SELECT id FROM schools WHERE slug = 'existing-school'
+);
+
+ALTER TABLE auth_sessions
+    ALTER COLUMN active_school_id SET NOT NULL;
+
+ALTER TABLE auth_sessions
+    ADD CONSTRAINT auth_sessions_school_membership_fkey
+    FOREIGN KEY (user_id, active_school_id)
+    REFERENCES school_memberships(user_id, school_id)
+    ON DELETE RESTRICT;
+
+CREATE INDEX auth_sessions_active_school_idx
+    ON auth_sessions(active_school_id);
+
+COMMENT ON TABLE schools IS
+    'Tenant root: each school owns its school-scoped academic and operational data.';
+COMMENT ON TABLE school_memberships IS
+    'Maps a global user identity to a school-specific role and membership status.';
+COMMENT ON COLUMN auth_sessions.active_school_id IS
+    'School context selected for this authenticated session.';
+
+-- ============================================================================
+-- 019_transport_tenant_integrity.sql
+-- ============================================================================
+-- Enforce school ownership throughout transport relationships.
+-- Migration 018 has already populated school_id for every existing row.
+BEGIN;
+
+ALTER TABLE transport_vehicles
+  ADD CONSTRAINT transport_vehicles_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE transport_routes
+  ADD CONSTRAINT transport_routes_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE transport_stops
+  ADD CONSTRAINT transport_stops_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE students
+  ADD CONSTRAINT students_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE academic_years
+  ADD CONSTRAINT academic_years_id_school_unique UNIQUE (id, school_id);
+
+-- Permit the same registration and route name in different schools.
+ALTER TABLE transport_vehicles
+  DROP CONSTRAINT IF EXISTS transport_vehicles_registration_number_key;
+CREATE UNIQUE INDEX transport_vehicles_school_registration_unique
+  ON transport_vehicles(school_id, registration_number);
+DROP INDEX IF EXISTS transport_routes_name_unique;
+CREATE UNIQUE INDEX transport_routes_school_name_unique
+  ON transport_routes(school_id, lower(name));
+
+ALTER TABLE transport_routes
+  ADD CONSTRAINT transport_routes_vehicle_same_school_fk
+  FOREIGN KEY (vehicle_id, school_id)
+  REFERENCES transport_vehicles(id, school_id)
+  ON DELETE RESTRICT;
+
+ALTER TABLE transport_stops
+  ADD CONSTRAINT transport_stops_route_same_school_fk
+  FOREIGN KEY (route_id, school_id)
+  REFERENCES transport_routes(id, school_id)
+  ON DELETE RESTRICT;
+
+ALTER TABLE transport_allocations
+  ADD CONSTRAINT transport_allocations_student_same_school_fk
+  FOREIGN KEY (student_id, school_id)
+  REFERENCES students(id, school_id)
+  ON DELETE RESTRICT,
+  ADD CONSTRAINT transport_allocations_stop_same_school_fk
+  FOREIGN KEY (stop_id, school_id)
+  REFERENCES transport_stops(id, school_id)
+  ON DELETE RESTRICT,
+  ADD CONSTRAINT transport_allocations_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id)
+  ON DELETE RESTRICT;
+
+CREATE INDEX transport_vehicles_school_idx ON transport_vehicles(school_id);
+CREATE INDEX transport_routes_school_idx ON transport_routes(school_id);
+CREATE INDEX transport_stops_school_idx ON transport_stops(school_id);
+CREATE INDEX transport_allocations_school_idx ON transport_allocations(school_id);
+
+-- ============================================================================
+-- 020_academic_tenant_integrity.sql
+-- ============================================================================
+-- Scope academic catalogue records and enforce same-school parent relationships.
+ALTER TABLE terms
+  ADD CONSTRAINT terms_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE classes
+  ADD CONSTRAINT classes_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE sections
+  ADD CONSTRAINT sections_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE subjects
+  ADD CONSTRAINT subjects_id_school_unique UNIQUE (id, school_id);
+
+ALTER TABLE terms
+  ADD CONSTRAINT terms_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+ALTER TABLE classes
+  ADD CONSTRAINT classes_year_same_school_fk
+  FOREIGN KEY (academic_year_id, school_id)
+  REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+ALTER TABLE sections
+  ADD CONSTRAINT sections_class_same_school_fk
+  FOREIGN KEY (class_id, school_id)
+  REFERENCES classes(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS academic_years_name_unique;
+CREATE UNIQUE INDEX academic_years_school_name_unique
+  ON academic_years(school_id, lower(name));
+DROP INDEX IF EXISTS academic_years_single_current;
+CREATE UNIQUE INDEX academic_years_school_single_current
+  ON academic_years(school_id) WHERE is_current;
+
+CREATE INDEX academic_years_school_dates_idx
+  ON academic_years(school_id, start_date, end_date);
+CREATE INDEX terms_school_year_dates_idx
+  ON terms(school_id, academic_year_id, start_date, end_date);
+CREATE INDEX classes_school_year_idx
+  ON classes(school_id, academic_year_id);
+CREATE INDEX sections_school_class_idx
+  ON sections(school_id, class_id);
+
+ALTER TABLE subjects DROP CONSTRAINT IF EXISTS subjects_code_key;
+DROP INDEX IF EXISTS subjects_name_unique;
+CREATE UNIQUE INDEX subjects_school_code_unique
+  ON subjects(school_id, code);
+CREATE UNIQUE INDEX subjects_school_name_unique
+  ON subjects(school_id, lower(name));
+CREATE INDEX subjects_school_idx ON subjects(school_id);
+
+-- ============================================================================
+-- 021_student_parent_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for student, parent, enrollment and family links.
+-- Migration 018 assigned all existing records to the initial school.
+ALTER TABLE parents
+  DROP CONSTRAINT IF EXISTS parents_user_id_key,
+  ADD CONSTRAINT parents_id_school_unique UNIQUE (id, school_id);
+ALTER TABLE parents
+  ADD CONSTRAINT parents_school_user_unique UNIQUE (school_id, user_id);
+
+ALTER TABLE students
+  DROP CONSTRAINT IF EXISTS students_user_id_key;
+ALTER TABLE students
+  ADD CONSTRAINT students_school_user_unique UNIQUE (school_id, user_id);
+
+ALTER TABLE students
+  DROP CONSTRAINT IF EXISTS students_admission_number_key;
+CREATE UNIQUE INDEX students_school_admission_number_unique
+  ON students(school_id, admission_number);
+
+ALTER TABLE student_parents
+  ADD CONSTRAINT student_parents_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT student_parents_parent_same_school_fk
+    FOREIGN KEY (parent_id, school_id)
+    REFERENCES parents(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE enrollments
+  ADD CONSTRAINT enrollments_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id)
+    REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_class_same_school_fk
+    FOREIGN KEY (class_id, school_id)
+    REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT enrollments_section_same_school_fk
+    FOREIGN KEY (section_id, school_id)
+    REFERENCES sections(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE student_status_history
+  ADD CONSTRAINT student_status_history_student_same_school_fk
+    FOREIGN KEY (student_id, school_id)
+    REFERENCES students(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX student_parents_school_parent_idx
+  ON student_parents(school_id, parent_id, student_id);
+CREATE INDEX enrollments_school_student_year_idx
+  ON enrollments(school_id, student_id, academic_year_id);
+CREATE INDEX student_status_history_school_student_idx
+  ON student_status_history(school_id, student_id, changed_at DESC);
+
+-- ============================================================================
+-- 022_teacher_staff_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for teacher profiles, assignments and staff.
+-- Existing records retain the school_id assigned by migration 018.
+ALTER TABLE teachers
+  DROP CONSTRAINT IF EXISTS teachers_user_id_key,
+  DROP CONSTRAINT IF EXISTS teachers_employee_number_key,
+  ADD CONSTRAINT teachers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT teachers_school_user_unique UNIQUE (school_id, user_id);
+CREATE UNIQUE INDEX teachers_school_employee_number_unique
+  ON teachers(school_id, employee_number);
+CREATE INDEX teachers_school_status_idx
+  ON teachers(school_id, employment_status);
+
+ALTER TABLE teacher_assignments
+  ADD CONSTRAINT teacher_assignments_teacher_same_school_fk
+    FOREIGN KEY (teacher_id, school_id)
+    REFERENCES teachers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_class_same_school_fk
+    FOREIGN KEY (class_id, school_id)
+    REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id)
+    REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT teacher_assignments_subject_same_school_fk
+    FOREIGN KEY (subject_id, school_id)
+    REFERENCES subjects(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS teacher_assignments_class_teacher_unique;
+DROP INDEX IF EXISTS teacher_assignments_subject_unique;
+CREATE UNIQUE INDEX teacher_assignments_school_class_teacher_unique
+  ON teacher_assignments(school_id, class_id) WHERE kind='class_teacher';
+CREATE UNIQUE INDEX teacher_assignments_school_subject_unique
+  ON teacher_assignments(school_id, class_id, subject_id) WHERE kind='subject_teacher';
+CREATE INDEX teacher_assignments_school_teacher_idx
+  ON teacher_assignments(school_id, teacher_id, class_id);
+
+ALTER TABLE staff_members
+  DROP CONSTRAINT IF EXISTS staff_members_employee_number_key;
+CREATE UNIQUE INDEX staff_members_school_employee_number_unique
+  ON staff_members(school_id, employee_number);
+CREATE INDEX staff_members_school_type_status_idx
+  ON staff_members(school_id, staff_type, employment_status);
+
+-- ============================================================================
+-- 023_attendance_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership throughout attendance registers, entries and audit history.
+-- Migration 018 assigned existing attendance records to the initial school.
+ALTER TABLE attendance_registers
+  ADD CONSTRAINT attendance_registers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT attendance_registers_section_same_school_fk
+    FOREIGN KEY (section_id, school_id) REFERENCES sections(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_registers_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_registers_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE enrollments
+  ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+
+ALTER TABLE attendance_entries
+  ADD CONSTRAINT attendance_entries_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT attendance_entries_register_same_school_fk
+    FOREIGN KEY (register_id, school_id) REFERENCES attendance_registers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_entries_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT attendance_entries_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE attendance_audit
+  ADD CONSTRAINT attendance_audit_entry_same_school_fk
+    FOREIGN KEY (entry_id, school_id) REFERENCES attendance_entries(id, school_id) ON DELETE RESTRICT;
+
+DROP INDEX IF EXISTS attendance_entries_student_day_unique;
+CREATE UNIQUE INDEX attendance_entries_school_student_day_unique
+  ON attendance_entries(school_id, student_id, attendance_date) WHERE status <> 'void';
+
+CREATE INDEX attendance_registers_school_section_date_idx
+  ON attendance_registers(school_id, section_id, attendance_date);
+CREATE INDEX attendance_entries_school_register_idx
+  ON attendance_entries(school_id, register_id, student_id);
+CREATE INDEX attendance_entries_school_student_date_idx
+  ON attendance_entries(school_id, student_id, attendance_date);
+CREATE INDEX attendance_audit_school_entry_idx
+  ON attendance_audit(school_id, entry_id, id);
+
+
+-- Keep audit rows in the same tenant as the attendance entry that generated them.
+CREATE OR REPLACE FUNCTION audit_attendance_change() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO attendance_audit(school_id,entry_id,new_status,new_note,changed_by)
+  VALUES(NEW.school_id,NEW.id,NEW.status,NEW.note,NEW.updated_by);
+ ELSIF (NEW.status,NEW.note) IS DISTINCT FROM (OLD.status,OLD.note) THEN
+  INSERT INTO attendance_audit(school_id,entry_id,previous_status,previous_note,new_status,new_note,reason,changed_by)
+  VALUES(NEW.school_id,NEW.id,OLD.status,OLD.note,NEW.status,NEW.note,NEW.change_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 024_fees_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for fee structures, invoices, payments and audit events.
+-- Migration 018 assigned existing fee records to the initial school.
+-- Depends on 023 (enrollments_id_school_unique); guarded so it also applies if 023 is absent.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enrollments_id_school_unique') THEN
+    ALTER TABLE enrollments ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+  END IF;
+END $$;
+
+ALTER TABLE fee_structures
+  ADD CONSTRAINT fee_structures_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_structures_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_structures_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE fee_invoices
+  ADD CONSTRAINT fee_invoices_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_invoices_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_structure_same_school_fk
+    FOREIGN KEY (fee_structure_id, school_id) REFERENCES fee_structures(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_invoices_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE fee_payments
+  DROP CONSTRAINT IF EXISTS fee_payments_idempotency_key_key,
+  ADD CONSTRAINT fee_payments_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT fee_payments_invoice_same_school_fk
+    FOREIGN KEY (invoice_id, school_id) REFERENCES fee_invoices(id, school_id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX fee_payments_school_idempotency_unique
+  ON fee_payments(school_id, idempotency_key);
+
+ALTER TABLE fee_events
+  ADD CONSTRAINT fee_events_invoice_same_school_fk
+    FOREIGN KEY (invoice_id, school_id) REFERENCES fee_invoices(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT fee_events_payment_same_school_fk
+    FOREIGN KEY (payment_id, school_id) REFERENCES fee_payments(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX fee_structures_school_class_year_idx ON fee_structures(school_id, class_id, academic_year_id);
+CREATE INDEX fee_invoices_school_student_idx ON fee_invoices(school_id, student_id);
+CREATE INDEX fee_invoices_school_year_due_idx ON fee_invoices(school_id, academic_year_id, due_on);
+CREATE INDEX fee_payments_school_invoice_idx ON fee_payments(school_id, invoice_id, reversed_at);
+CREATE INDEX fee_events_school_invoice_idx ON fee_events(school_id, invoice_id, id);
+
+-- Audit triggers must write the owning school on every fee event.
+CREATE OR REPLACE FUNCTION audit_fee_invoice() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    INSERT INTO fee_events(school_id,invoice_id,kind,amount_minor,actor_id)
+    VALUES(NEW.school_id,NEW.id,'invoice_issued',NEW.amount_minor,NEW.created_by);
+  ELSE
+    INSERT INTO fee_events(school_id,invoice_id,kind,amount_minor,actor_id,reason)
+    VALUES(NEW.school_id,NEW.id,'invoice_voided',NEW.amount_minor,NEW.voided_by,NEW.void_reason);
+  END IF;
+  RETURN NEW;
+END; $$;
+
+CREATE OR REPLACE FUNCTION audit_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='INSERT' THEN
+    INSERT INTO fee_events(school_id,invoice_id,payment_id,kind,amount_minor,actor_id)
+    VALUES(NEW.school_id,NEW.invoice_id,NEW.id,'payment_recorded',NEW.amount_minor,NEW.recorded_by);
+  ELSE
+    INSERT INTO fee_events(school_id,invoice_id,payment_id,kind,amount_minor,actor_id,reason)
+    VALUES(NEW.school_id,NEW.invoice_id,NEW.id,'payment_reversed',NEW.amount_minor,NEW.reversed_by,NEW.reversal_reason);
+  END IF;
+  RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 025_exams_tenant_integrity.sql
+-- ============================================================================
+-- Enforce same-school ownership for grading scales, exams, candidates, papers, marks and audit history.
+-- Migration 018 assigned existing exam records (including the default grading scale) to the initial school.
+-- Depends on 023 (enrollments_id_school_unique); guarded so it also applies if 023 is absent.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'enrollments_id_school_unique') THEN
+    ALTER TABLE enrollments ADD CONSTRAINT enrollments_id_school_unique UNIQUE (id, school_id);
+  END IF;
+END $$;
+
+ALTER TABLE exam_grading_scales
+  ADD CONSTRAINT exam_grading_scales_id_school_unique UNIQUE (id, school_id);
+DROP INDEX IF EXISTS exam_grading_scales_name_unique;
+CREATE UNIQUE INDEX exam_grading_scales_school_name_unique ON exam_grading_scales(school_id, lower(name));
+
+ALTER TABLE exam_grade_bands
+  ADD CONSTRAINT exam_grade_bands_scale_same_school_fk
+    FOREIGN KEY (scale_id, school_id) REFERENCES exam_grading_scales(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exams
+  ADD CONSTRAINT exams_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exams_class_same_school_fk
+    FOREIGN KEY (class_id, school_id) REFERENCES classes(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_year_same_school_fk
+    FOREIGN KEY (academic_year_id, school_id) REFERENCES academic_years(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_term_same_school_fk
+    FOREIGN KEY (term_id, school_id) REFERENCES terms(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exams_scale_same_school_fk
+    FOREIGN KEY (grading_scale_id, school_id) REFERENCES exam_grading_scales(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_candidates
+  ADD CONSTRAINT exam_candidates_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_enrollment_same_school_fk
+    FOREIGN KEY (enrollment_id, school_id) REFERENCES enrollments(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_candidates_section_same_school_fk
+    FOREIGN KEY (section_id, school_id) REFERENCES sections(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_papers
+  ADD CONSTRAINT exam_papers_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exam_papers_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_papers_subject_same_school_fk
+    FOREIGN KEY (subject_id, school_id) REFERENCES subjects(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_marks
+  ADD CONSTRAINT exam_marks_id_school_unique UNIQUE (id, school_id),
+  ADD CONSTRAINT exam_marks_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_marks_paper_same_school_fk
+    FOREIGN KEY (paper_id, school_id) REFERENCES exam_papers(id, school_id) ON DELETE RESTRICT,
+  ADD CONSTRAINT exam_marks_student_same_school_fk
+    FOREIGN KEY (student_id, school_id) REFERENCES students(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_mark_audit
+  ADD CONSTRAINT exam_mark_audit_mark_same_school_fk
+    FOREIGN KEY (mark_id, school_id) REFERENCES exam_marks(id, school_id) ON DELETE RESTRICT;
+
+ALTER TABLE exam_events
+  ADD CONSTRAINT exam_events_exam_same_school_fk
+    FOREIGN KEY (exam_id, school_id) REFERENCES exams(id, school_id) ON DELETE RESTRICT;
+
+CREATE INDEX exams_school_class_year_idx ON exams(school_id, class_id, academic_year_id);
+CREATE INDEX exam_candidates_school_exam_idx ON exam_candidates(school_id, exam_id, student_id);
+CREATE INDEX exam_papers_school_exam_idx ON exam_papers(school_id, exam_id);
+CREATE INDEX exam_marks_school_exam_student_idx ON exam_marks(school_id, exam_id, student_id);
+CREATE INDEX exam_mark_audit_school_mark_idx ON exam_mark_audit(school_id, mark_id, id);
+CREATE INDEX exam_events_school_exam_idx ON exam_events(school_id, exam_id, id);
+
+-- Audit triggers must write the owning school on every audit row.
+CREATE OR REPLACE FUNCTION audit_exam_mark() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO exam_mark_audit(school_id,mark_id,new_outcome,new_score,new_remark,changed_by)
+  VALUES(NEW.school_id,NEW.id,NEW.outcome,NEW.score,NEW.remark,NEW.updated_by);
+ ELSIF (NEW.outcome,NEW.score,NEW.remark) IS DISTINCT FROM (OLD.outcome,OLD.score,OLD.remark) THEN
+  INSERT INTO exam_mark_audit(school_id,mark_id,previous_outcome,previous_score,previous_remark,new_outcome,new_score,new_remark,reason,changed_by)
+  VALUES(NEW.school_id,NEW.id,OLD.outcome,OLD.score,OLD.remark,NEW.outcome,NEW.score,NEW.remark,NEW.change_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+CREATE OR REPLACE FUNCTION audit_exam_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF TG_OP='INSERT' THEN
+  INSERT INTO exam_events(school_id,exam_id,action,actor_id) VALUES(NEW.school_id,NEW.id,'created',NEW.created_by);
+ ELSE
+  INSERT INTO exam_events(school_id,exam_id,action,reason,actor_id)
+  VALUES(NEW.school_id,NEW.id,CASE NEW.status WHEN 'published' THEN 'published' WHEN 'cancelled' THEN 'cancelled' ELSE 'reopened' END,NEW.action_reason,NEW.updated_by);
+ END IF;
+ RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 026_audit_triggers_school_id.sql
+-- ============================================================================
+-- Timetable audit rows must carry the slot's school_id (NOT NULL since tenant migration).
+CREATE OR REPLACE FUNCTION audit_timetable_slot() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE event text;
+BEGIN
+ IF TG_OP='INSERT' THEN event='created';INSERT INTO timetable_audit(school_id,slot_id,action,new_values,actor_id,note) VALUES(NEW.school_id,NEW.id,event,to_jsonb(NEW),NEW.changed_by,NEW.change_note);
+ ELSE event=CASE WHEN OLD.assignment_id IS NOT NULL AND NEW.assignment_id IS NULL THEN 'detached' WHEN OLD.active AND NOT NEW.active THEN 'deactivated' WHEN NOT OLD.active AND NEW.active THEN 'reactivated' ELSE 'updated' END;INSERT INTO timetable_audit(school_id,slot_id,action,previous_values,new_values,actor_id,note) VALUES(NEW.school_id,NEW.id,event,to_jsonb(OLD),to_jsonb(NEW),NEW.changed_by,NEW.change_note);END IF;RETURN NEW;
+END; $$;
+
+-- Notice audit rows must carry the notice's school_id as well.
+CREATE OR REPLACE FUNCTION audit_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE action_name text;
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO notice_audit(school_id,notice_id,action,new_values,actor_id) VALUES(NEW.school_id,NEW.id,'created',to_jsonb(NEW),NEW.created_by);
+ ELSE action_name=CASE WHEN NEW.status=OLD.status THEN 'updated' WHEN NEW.status='published' THEN 'published' WHEN NEW.status='archived' THEN 'archived' WHEN OLD.status='archived' THEN 'restored' ELSE 'unpublished' END;INSERT INTO notice_audit(school_id,notice_id,action,previous_values,new_values,actor_id,reason) VALUES(NEW.school_id,NEW.id,action_name,to_jsonb(OLD),to_jsonb(NEW),NEW.updated_by,NEW.action_reason);END IF;RETURN NEW;
+END; $$;
+
+-- ============================================================================
+-- 027_session_management_login_history.sql
+-- ============================================================================
+ALTER TABLE auth_sessions ADD COLUMN IF NOT EXISTS user_agent text, ADD COLUMN IF NOT EXISTS ip text;
+CREATE TABLE IF NOT EXISTS login_events (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+ email text,
+ success boolean NOT NULL,
+ reason text,
+ ip text,
+ user_agent text,
+ school_id uuid REFERENCES schools(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS login_events_user_created_idx ON login_events(user_id,created_at DESC);
+
+-- ============================================================================
+-- 028_per_school_numbering.sql
+-- ============================================================================
+-- Per-school, gap-free invoice and receipt numbers. The counter row is updated inside the inserting transaction,
+-- so a rollback (including a rejected overpayment) also rolls the counter back and no number is skipped.
+CREATE TABLE school_counters (
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ name text NOT NULL CHECK (name IN ('invoice','receipt')),
+ next_value bigint NOT NULL CHECK (next_value >= 1),
+ PRIMARY KEY (school_id, name)
+);
+INSERT INTO school_counters(school_id,name,next_value) SELECT school_id,'invoice',max(invoice_number)+1 FROM fee_invoices GROUP BY school_id;
+INSERT INTO school_counters(school_id,name,next_value) SELECT school_id,'receipt',max(receipt_number)+1 FROM fee_payments GROUP BY school_id;
+ALTER TABLE fee_invoices ALTER COLUMN invoice_number DROP IDENTITY;
+ALTER TABLE fee_payments ALTER COLUMN receipt_number DROP IDENTITY;
+ALTER TABLE fee_invoices DROP CONSTRAINT IF EXISTS fee_invoices_invoice_number_key;
+ALTER TABLE fee_payments DROP CONSTRAINT IF EXISTS fee_payments_receipt_number_key;
+ALTER TABLE fee_invoices ADD CONSTRAINT fee_invoices_school_number_key UNIQUE (school_id, invoice_number);
+ALTER TABLE fee_payments ADD CONSTRAINT fee_payments_school_number_key UNIQUE (school_id, receipt_number);
+CREATE FUNCTION next_school_number(p_school uuid, p_name text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE v bigint;
+BEGIN
+ INSERT INTO school_counters(school_id,name,next_value) VALUES(p_school,p_name,2)
+ ON CONFLICT (school_id,name) DO UPDATE SET next_value=school_counters.next_value+1
+ RETURNING next_value-1 INTO v;
+ RETURN v;
+END; $$;
+CREATE FUNCTION assign_invoice_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.invoice_number := next_school_number(NEW.school_id,'invoice'); RETURN NEW; END; $$;
+CREATE FUNCTION assign_receipt_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.receipt_number := next_school_number(NEW.school_id,'receipt'); RETURN NEW; END; $$;
+CREATE TRIGGER fee_invoices_number BEFORE INSERT ON fee_invoices FOR EACH ROW EXECUTE FUNCTION assign_invoice_number();
+CREATE TRIGGER fee_payments_number BEFORE INSERT ON fee_payments FOR EACH ROW EXECUTE FUNCTION assign_receipt_number();
+
+-- ============================================================================
+-- 029_must_change_password.sql
+-- ============================================================================
+ALTER TABLE users ADD COLUMN must_change_password boolean NOT NULL DEFAULT false;
+
+-- ============================================================================
+-- 030_staff_roles.sql
+-- ============================================================================
+-- Adds Principal, Accountant, Receptionist, Librarian and Transport Manager roles.
+ALTER TABLE users DROP CONSTRAINT users_role_check;
+ALTER TABLE users ALTER COLUMN role TYPE varchar(20);
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin','principal','accountant','receptionist','librarian','transport_manager','teacher','student','parent'));
+ALTER TABLE school_memberships DROP CONSTRAINT school_memberships_role_check;
+ALTER TABLE school_memberships ALTER COLUMN role TYPE varchar(20);
+ALTER TABLE school_memberships ADD CONSTRAINT school_memberships_role_check CHECK (role IN ('admin','principal','accountant','receptionist','librarian','transport_manager','teacher','student','parent'));
+
+-- ============================================================================
+-- 031_school_profiles.sql
+-- ============================================================================
+-- Per-school public profile: display name, address, contact details, principal name, and an optional logo
+-- stored as bytea (decision D1: small files in PostgreSQL, ≤512 KiB, MIME and size checked at the API boundary).
+CREATE TABLE school_profiles (
+ school_id uuid PRIMARY KEY REFERENCES schools(id) ON DELETE CASCADE,
+ display_name varchar(120) NOT NULL CHECK(length(trim(display_name)) BETWEEN 1 AND 120),
+ address varchar(500),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ email varchar(254) CHECK(email IS NULL OR email = lower(email)),
+ principal_name varchar(100) CHECK(principal_name IS NULL OR length(trim(principal_name)) BETWEEN 1 AND 100),
+ letterhead_text varchar(500),
+ logo_mime varchar(64) CHECK(logo_mime IS NULL OR logo_mime IN ('image/png','image/jpeg')),
+ logo_bytea bytea CHECK(logo_bytea IS NULL OR octet_length(logo_bytea) <= 524288),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ updated_by uuid REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ============================================================================
+-- 032_fees_carryover.sql
+-- ============================================================================
+-- Fees carry-over (BATCH_1_HANDOFF.md §2.1). fee_invoices.amount_minor stays snapshot-protected; concessions,
+-- instalments, penalties and refunds live in their own tables so the invoice row remains immutable.
+-- Balance = invoice.amount_minor - concessions - payments + penalties + refunds. The existing guard_fee_payment
+-- trigger is replaced so a payment is rejected only when it would exceed this balance. Concessions and refunds
+-- are also guarded so they cannot bring the effective outstanding amount below zero.
+
+CREATE TABLE fee_concessions (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ approved_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ approved_at timestamptz NOT NULL DEFAULT now(),
+ voided_at timestamptz,
+ voided_by uuid REFERENCES users(id) ON DELETE RESTRICT,
+ void_reason varchar(200),
+ CHECK((voided_at IS NULL AND voided_by IS NULL AND void_reason IS NULL) OR
+       (voided_at IS NOT NULL AND voided_by IS NOT NULL AND void_reason IS NOT NULL AND length(trim(void_reason)) >= 3))
+);
+CREATE INDEX fee_concessions_invoice_idx ON fee_concessions(invoice_id, voided_at);
+
+CREATE TABLE fee_instalments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE CASCADE,
+ due_on date NOT NULL,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ position integer NOT NULL DEFAULT 0,
+ UNIQUE(invoice_id, due_on)
+);
+CREATE INDEX fee_instalments_invoice_idx ON fee_instalments(invoice_id, position);
+
+CREATE TABLE fee_penalties (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ rule varchar(40) NOT NULL CHECK(rule IN ('late_flat','late_percentage','manual')),
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ applied_on date NOT NULL CHECK(applied_on <= CURRENT_DATE),
+ applied_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ reason varchar(200),
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX fee_penalties_invoice_idx ON fee_penalties(invoice_id);
+
+CREATE TABLE fee_refunds (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ invoice_id uuid NOT NULL REFERENCES fee_invoices(id) ON DELETE RESTRICT,
+ payment_id uuid NOT NULL REFERENCES fee_payments(id) ON DELETE RESTRICT,
+ refund_number bigint NOT NULL,
+ amount_minor integer NOT NULL CHECK(amount_minor BETWEEN 1 AND 1000000000),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ refunded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ refunded_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(invoice_id, payment_id),
+ FOREIGN KEY(payment_id, invoice_id) REFERENCES fee_payments(id, invoice_id) ON DELETE RESTRICT
+);
+CREATE UNIQUE INDEX fee_refunds_school_number_key ON fee_refunds(school_id, refund_number);
+CREATE INDEX fee_refunds_payment_idx ON fee_refunds(payment_id);
+
+-- Extend school_counters to also cover the refund series. The certificate series is added in 034.
+ALTER TABLE school_counters DROP CONSTRAINT school_counters_name_check;
+ALTER TABLE school_counters ADD CONSTRAINT school_counters_name_check CHECK(name IN ('invoice','receipt','refund'));
+INSERT INTO school_counters(school_id,name,next_value) SELECT id,'refund',1 FROM schools WHERE NOT EXISTS (SELECT 1 FROM school_counters c WHERE c.school_id=schools.id AND c.name='refund');
+
+-- Replace the payment guard so it accounts for concessions, penalties and refunds. The invoice row is still locked.
+CREATE OR REPLACE FUNCTION guard_fee_payment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE inv fee_invoices; paid bigint; concessions bigint; penalties bigint; refunds bigint; outstanding bigint;
+BEGIN
+ SELECT * INTO inv FROM fee_invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF inv.id IS NULL THEN RAISE EXCEPTION 'Invoice not found' USING ERRCODE='23503'; END IF;
+ IF TG_OP='UPDATE' THEN
+  IF (NEW.id,NEW.receipt_number,NEW.invoice_id,NEW.amount_minor,NEW.paid_on,NEW.method,NEW.reference,NEW.idempotency_key,NEW.recorded_by,NEW.recorded_at) IS DISTINCT FROM (OLD.id,OLD.receipt_number,NEW.invoice_id,OLD.amount_minor,OLD.paid_on,OLD.method,OLD.reference,OLD.idempotency_key,NEW.recorded_by,NEW.recorded_at) OR OLD.reversed_at IS NOT NULL OR NEW.reversed_at IS NULL THEN
+   RAISE EXCEPTION 'Payments can only be reversed once' USING ERRCODE='23514'; END IF;
+  RETURN NEW;
+ END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO paid FROM fee_payments WHERE invoice_id=NEW.invoice_id AND reversed_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO concessions FROM fee_concessions WHERE invoice_id=NEW.invoice_id AND voided_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO penalties FROM fee_penalties WHERE invoice_id=NEW.invoice_id;
+ SELECT coalesce(sum(amount_minor),0) INTO refunds FROM fee_refunds WHERE invoice_id=NEW.invoice_id;
+ outstanding := inv.amount_minor - concessions - paid + penalties - refunds;
+ IF inv.voided_at IS NOT NULL OR NEW.paid_on<inv.issued_on OR NEW.amount_minor>outstanding OR NEW.reversed_at IS NOT NULL THEN
+  RAISE EXCEPTION 'Invalid payment date, void invoice or overpayment' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+
+-- Concessions cannot bring the effective outstanding amount below zero (no negative balance).
+CREATE FUNCTION guard_fee_concession() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE inv fee_invoices; paid bigint; concessions bigint; penalties bigint; refunds bigint; outstanding bigint;
+BEGIN
+ SELECT * INTO inv FROM fee_invoices WHERE id=NEW.invoice_id FOR UPDATE;
+ IF inv.id IS NULL THEN RAISE EXCEPTION 'Invoice not found' USING ERRCODE='23503'; END IF;
+ IF inv.voided_at IS NOT NULL THEN RAISE EXCEPTION 'Cannot add a concession to a void invoice' USING ERRCODE='23514'; END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO paid FROM fee_payments WHERE invoice_id=NEW.invoice_id AND reversed_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO concessions FROM fee_concessions WHERE invoice_id=NEW.invoice_id AND voided_at IS NULL;
+ SELECT coalesce(sum(amount_minor),0) INTO penalties FROM fee_penalties WHERE invoice_id=NEW.invoice_id;
+ SELECT coalesce(sum(amount_minor),0) INTO refunds FROM fee_refunds WHERE invoice_id=NEW.invoice_id;
+ outstanding := inv.amount_minor - concessions - paid + penalties - refunds;
+ IF NEW.amount_minor > outstanding THEN RAISE EXCEPTION 'Concession exceeds outstanding amount' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_concessions_guard BEFORE INSERT OR UPDATE ON fee_concessions FOR EACH ROW EXECUTE FUNCTION guard_fee_concession();
+
+-- Refunds cannot exceed the parent payment's reversible amount.
+CREATE FUNCTION guard_fee_refund() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE pay fee_payments; already_refunded bigint;
+BEGIN
+ SELECT * INTO pay FROM fee_payments WHERE id=NEW.payment_id AND invoice_id=NEW.invoice_id FOR UPDATE;
+ IF pay.id IS NULL THEN RAISE EXCEPTION 'Payment not found' USING ERRCODE='23503'; END IF;
+ IF pay.reversed_at IS NOT NULL THEN RAISE EXCEPTION 'Cannot refund a reversed payment' USING ERRCODE='23514'; END IF;
+ SELECT coalesce(sum(amount_minor),0) INTO already_refunded FROM fee_refunds WHERE payment_id=NEW.payment_id AND id<>NEW.id;
+ IF NEW.amount_minor > pay.amount_minor - already_refunded THEN RAISE EXCEPTION 'Refund exceeds reversible amount of the payment' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER fee_refunds_guard BEFORE INSERT OR UPDATE ON fee_refunds FOR EACH ROW EXECUTE FUNCTION guard_fee_refund();
+
+-- Assign refund numbers from the per-school series.
+CREATE FUNCTION assign_refund_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.refund_number := next_school_number(NEW.school_id,'refund'); RETURN NEW; END; $$;
+CREATE TRIGGER fee_refunds_number BEFORE INSERT ON fee_refunds FOR EACH ROW EXECUTE FUNCTION assign_refund_number();
+
+-- Extend the fee_events kind vocabulary so concessions, penalties and refunds are auditable alongside invoices and payments.
+-- The original CHECK constraints in migration 006 were inline; column-level checks are auto-named fee_events_kind_check,
+-- table-level checks are auto-named fee_events_check (presence) and fee_events_check1 (reason). Drop them by name.
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_kind_check;
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_check;
+ALTER TABLE fee_events DROP CONSTRAINT IF EXISTS fee_events_check1;
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_kind_check CHECK(kind IN ('invoice_issued','invoice_voided','payment_recorded','payment_reversed','concession_recorded','concession_voided','penalty_applied','refund_issued'));
+ALTER TABLE fee_events ALTER COLUMN payment_id DROP NOT NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS concession_id uuid REFERENCES fee_concessions(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS penalty_id uuid REFERENCES fee_penalties(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD COLUMN IF NOT EXISTS refund_id uuid REFERENCES fee_refunds(id) ON DELETE SET NULL;
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_payment_presence_check CHECK(
+ (kind IN ('payment_recorded','payment_reversed','refund_issued')) = (payment_id IS NOT NULL)
+);
+ALTER TABLE fee_events ADD CONSTRAINT fee_events_reason_required_check CHECK(
+ kind NOT IN ('invoice_voided','payment_reversed','concession_voided','refund_issued') OR (reason IS NOT NULL AND length(trim(reason)) >= 3)
+);
+
+-- ============================================================================
+-- 033_report_cards.sql
+-- ============================================================================
+-- Report card remarks: principal/teacher can store a free-text remark per student per academic year per term.
+-- The mark and grade data itself comes from the existing exams tables; this table only stores the human remark.
+CREATE TABLE report_card_remarks (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ term varchar(40) NOT NULL CHECK(length(trim(term)) BETWEEN 1 AND 40),
+ remark varchar(500) NOT NULL CHECK(length(trim(remark)) BETWEEN 1 AND 500),
+ author_id uuid NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(student_id, academic_year_id, term)
+);
+CREATE INDEX report_card_remarks_student_idx ON report_card_remarks(student_id, academic_year_id);
+
+-- ============================================================================
+-- 034_certificates.sql
+-- ============================================================================
+-- Certificates (bonafide, transfer, study, character). Each issued certificate gets a per-school gap-free
+-- number from school_counters (the 'certificate' series), a snapshot of the student and school profile at
+-- issue time, and a voided_at/void_reason pair for revocation. Reissue creates a new row with a new number;
+-- the old row stays visible as superseded.
+ALTER TABLE school_counters DROP CONSTRAINT school_counters_name_check;
+ALTER TABLE school_counters ADD CONSTRAINT school_counters_name_check CHECK(name IN ('invoice','receipt','refund','certificate'));
+INSERT INTO school_counters(school_id,name,next_value) SELECT id,'certificate',1 FROM schools WHERE NOT EXISTS (SELECT 1 FROM school_counters c WHERE c.school_id=schools.id AND c.name='certificate');
+
+CREATE TABLE certificates_issued (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ certificate_number bigint NOT NULL,
+ type varchar(20) NOT NULL CHECK(type IN ('bonafide','transfer','study','character')),
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ issued_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ issued_at timestamptz NOT NULL DEFAULT now(),
+ snapshot jsonb NOT NULL,
+ voided_at timestamptz,
+ voided_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ void_reason varchar(200),
+ superseded_by uuid REFERENCES certificates_issued(id) ON DELETE SET NULL,
+ UNIQUE(school_id, certificate_number),
+ CHECK((voided_at IS NULL AND voided_by IS NULL AND void_reason IS NULL) OR
+       (voided_at IS NOT NULL AND voided_by IS NOT NULL AND void_reason IS NOT NULL AND length(trim(void_reason)) >= 3))
+);
+CREATE INDEX certificates_student_idx ON certificates_issued(student_id);
+CREATE INDEX certificates_school_type_idx ON certificates_issued(school_id, type);
+
+CREATE FUNCTION assign_certificate_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.certificate_number := next_school_number(NEW.school_id,'certificate'); RETURN NEW; END; $$;
+CREATE TRIGGER certificates_issued_number BEFORE INSERT ON certificates_issued FOR EACH ROW EXECUTE FUNCTION assign_certificate_number();
+
+-- ============================================================================
+-- 035_subject_combinations.sql
+-- ============================================================================
+-- Subject combinations per class: a class may declare which subjects are taught, so report cards and
+-- timetable generation can iterate a fixed set rather than scanning every paper. Light-touch: a link table
+-- with class_id + subject_id, scoped per school (the class and subject tables are already school-scoped).
+CREATE TABLE class_subject_combinations (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ class_id uuid NOT NULL,
+ subject_id uuid NOT NULL,
+ is_compulsory boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(class_id, subject_id),
+ FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE,
+ FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE RESTRICT
+);
+CREATE INDEX class_subject_combinations_class_idx ON class_subject_combinations(class_id);
+CREATE INDEX class_subject_combinations_subject_idx ON class_subject_combinations(subject_id);
+-- Same-school guard: the class and subject must belong to the same school as the row.
+CREATE FUNCTION guard_class_subject_combination() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE cls classes; sub subjects;
+BEGIN
+ SELECT * INTO cls FROM classes WHERE id=NEW.class_id FOR SHARE;
+ SELECT * INTO sub FROM subjects WHERE id=NEW.subject_id FOR SHARE;
+ IF cls.id IS NULL OR sub.id IS NULL OR cls.school_id<>NEW.school_id OR sub.school_id<>NEW.school_id THEN
+  RAISE EXCEPTION 'Class and subject must belong to the same school' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER class_subject_combinations_guard BEFORE INSERT OR UPDATE ON class_subject_combinations FOR EACH ROW EXECUTE FUNCTION guard_class_subject_combination();
+
+-- ============================================================================
+-- 036_staff_homework.sql
+-- ============================================================================
+-- Batch 3 part 1: staff attendance, staff documents, homework attachments and submissions (D1: bytea ≤512 KiB).
+CREATE TABLE staff_attendance (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ attendance_date date NOT NULL CHECK(attendance_date <= CURRENT_DATE),
+ status varchar(10) NOT NULL CHECK(status IN ('present','absent','leave','half_day')),
+ note varchar(200),
+ recorded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(staff_id, attendance_date)
+);
+CREATE INDEX staff_attendance_school_date_idx ON staff_attendance(school_id, attendance_date);
+CREATE INDEX staff_attendance_staff_idx ON staff_attendance(staff_id, attendance_date);
+
+CREATE TABLE staff_documents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX staff_documents_staff_idx ON staff_documents(staff_id);
+
+CREATE TABLE homework_attachments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX homework_attachments_homework_idx ON homework_attachments(homework_id);
+
+CREATE TABLE homework_submissions (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ note varchar(500),
+ submitted_at timestamptz NOT NULL DEFAULT now(),
+ feedback varchar(1000),
+ feedback_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ feedback_at timestamptz,
+ UNIQUE(homework_id, student_id)
+);
+CREATE INDEX homework_submissions_homework_idx ON homework_submissions(homework_id);
+CREATE INDEX homework_submissions_student_idx ON homework_submissions(student_id);
+
+-- ============================================================================
+-- 037_attendance_exams_timetable_settings.sql
+-- ============================================================================
+-- Batch 3 part 2: attendance corrections queue, exam types, exam principal remarks, timetable periods,
+-- notification preferences. All tenant-scoped; school_id is written explicitly on every insert.
+CREATE TABLE attendance_corrections (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ attendance_date date NOT NULL,
+ requested_status varchar(8) NOT NULL CHECK(requested_status IN ('present','absent','late','excused','half_day')),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ requested_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ requested_at timestamptz NOT NULL DEFAULT now(),
+ status varchar(10) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+ reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ reviewed_at timestamptz,
+ review_note varchar(200),
+ UNIQUE(student_id, attendance_date)
+);
+CREATE INDEX attendance_corrections_school_status_idx ON attendance_corrections(school_id, status);
+CREATE INDEX attendance_corrections_student_idx ON attendance_corrections(student_id);
+
+CREATE TABLE exam_types (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ name varchar(60) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 60),
+ code varchar(20) NOT NULL CHECK(code ~ '^[A-Z0-9_-]{1,20}$'),
+ UNIQUE(school_id, code)
+);
+CREATE UNIQUE INDEX exam_types_school_name_unique ON exam_types(school_id, lower(name));
+CREATE INDEX exam_types_school_idx ON exam_types(school_id);
+
+CREATE TABLE exam_student_remarks (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ exam_id uuid NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ remark varchar(500) NOT NULL CHECK(length(trim(remark)) BETWEEN 1 AND 500),
+ author_id uuid NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(exam_id, student_id)
+);
+CREATE INDEX exam_student_remarks_exam_idx ON exam_student_remarks(exam_id);
+
+CREATE TABLE timetable_periods (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ day_of_week smallint NOT NULL CHECK(day_of_week BETWEEN 1 AND 7),
+ period_index smallint NOT NULL CHECK(period_index BETWEEN 1 AND 20),
+ start_time time NOT NULL,
+ end_time time NOT NULL CHECK(end_time > start_time),
+ is_break boolean NOT NULL DEFAULT false,
+ label varchar(40),
+ UNIQUE(school_id, day_of_week, period_index)
+);
+CREATE INDEX timetable_periods_school_day_idx ON timetable_periods(school_id, day_of_week, period_index);
+
+CREATE TABLE notification_preferences (
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ channel varchar(20) NOT NULL CHECK(channel IN ('in_app','email','sms')),
+ enabled boolean NOT NULL DEFAULT true,
+ digest varchar(10) NOT NULL DEFAULT 'instant' CHECK(digest IN ('instant','daily','weekly')),
+ PRIMARY KEY(school_id, user_id, channel)
+);
+CREATE INDEX notification_preferences_user_idx ON notification_preferences(user_id);
+
+-- ============================================================================
+-- 038_leave_messages.sql
+-- ============================================================================
+-- Batch 4 part 1: leave management (student + staff) and teacher-parent messaging (D6: Phase 1 includes
+-- student and staff leave; payroll is Phase 2 and NOT included here).
+CREATE TABLE leave_requests (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ person_type varchar(10) NOT NULL CHECK(person_type IN ('student','staff')),
+ person_id uuid NOT NULL,
+ from_date date NOT NULL,
+ to_date date NOT NULL CHECK(to_date >= from_date),
+ reason varchar(500) NOT NULL CHECK(length(trim(reason)) >= 3),
+ status varchar(10) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+ requested_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ requested_at timestamptz NOT NULL DEFAULT now(),
+ reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ reviewed_at timestamptz,
+ review_note varchar(200),
+ academic_year_id uuid REFERENCES academic_years(id) ON DELETE SET NULL,
+ CHECK((reviewed_at IS NULL) = (reviewed_by IS NULL) OR status='pending')
+);
+CREATE INDEX leave_requests_school_status_idx ON leave_requests(school_id, status);
+CREATE INDEX leave_requests_person_idx ON leave_requests(person_type, person_id);
+
+CREATE TABLE leave_balances (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+ total_days integer NOT NULL CHECK(total_days >= 0),
+ used_days integer NOT NULL DEFAULT 0 CHECK(used_days >= 0 AND used_days <= total_days),
+ UNIQUE(school_id, staff_id, academic_year_id)
+);
+CREATE INDEX leave_balances_staff_idx ON leave_balances(staff_id, academic_year_id);
+
+CREATE TABLE message_threads (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ teacher_id uuid NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+ parent_id uuid NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(school_id, teacher_id, parent_id, student_id)
+);
+CREATE INDEX message_threads_parent_idx ON message_threads(parent_id);
+CREATE INDEX message_threads_teacher_idx ON message_threads(teacher_id);
+
+CREATE TABLE message_messages (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ thread_id uuid NOT NULL REFERENCES message_threads(id) ON DELETE CASCADE,
+ body varchar(2000) NOT NULL CHECK(length(trim(body)) BETWEEN 1 AND 2000),
+ sent_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ sent_at timestamptz NOT NULL DEFAULT now(),
+ read_at timestamptz
+);
+CREATE INDEX message_messages_thread_idx ON message_messages(thread_id, sent_at);
+CREATE INDEX message_messages_recipient_idx ON message_messages(school_id, sent_at DESC);
+
+-- ============================================================================
+-- 039_mfa_secrets.sql
+-- ============================================================================
+-- Batch 4 part 2: TOTP MFA secrets (D8). The secret is stored as a base32 string; enrollment requires
+-- a fresh login and produces a one-time QR code; verification requires a 6-digit TOTP code.
+-- Backup codes are not generated in this phase.
+CREATE TABLE user_mfa_secrets (
+ user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ secret text NOT NULL,
+ enabled_at timestamptz NOT NULL DEFAULT now(),
+ last_used_at timestamptz
+);
+CREATE INDEX user_mfa_secrets_enabled_idx ON user_mfa_secrets(user_id) WHERE enabled_at IS NOT NULL;
+
+-- ============================================================================
+-- 040_notification_outbox.sql
+-- ============================================================================
+-- Notification outbox (referenced by §2.5 attendance, §2.13 communication, §2.15 certificates,
+-- §2.12 transport expiry, §2.9 homework). Provider delivery is P2; this table records the intent
+-- transactionally with the business action so a worker can pick it up later.
+CREATE TABLE notification_outbox (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ event_type varchar(40) NOT NULL CHECK(length(trim(event_type)) BETWEEN 1 AND 40),
+ channel varchar(10) NOT NULL CHECK(channel IN ('in_app','email','sms','whatsapp')),
+ recipient_ref varchar(254) NOT NULL,
+ template_key varchar(60) NOT NULL CHECK(length(trim(template_key)) BETWEEN 1 AND 60),
+ payload_ref uuid,
+ status varchar(12) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed','dead')),
+ attempt_count integer NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ provider_message_id varchar(200),
+ last_error_code varchar(60),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ sent_at timestamptz
+);
+CREATE INDEX notification_outbox_status_next_idx ON notification_outbox(status, next_attempt_at);
+CREATE INDEX notification_outbox_school_created_idx ON notification_outbox(school_id, created_at DESC);
+CREATE INDEX notification_outbox_recipient_idx ON notification_outbox(school_id, recipient_ref);
+
+CREATE TABLE notification_delivery_attempts (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ outbox_id uuid NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+ attempted_at timestamptz NOT NULL DEFAULT now(),
+ success boolean NOT NULL,
+ provider_response_code varchar(20),
+ provider_response_ref varchar(200),
+ error_message varchar(500)
+);
+CREATE INDEX notification_delivery_attempts_outbox_idx ON notification_delivery_attempts(outbox_id, attempted_at);
+
+-- ============================================================================
+-- 041_student_documents.sql
+-- ============================================================================
+-- Student documents (§2.2 P1). Tenant-owned document table with MIME/size guards per D1.
+-- Supports the profile "documents" tab: upload, list, download with tenant-scoped authorization.
+CREATE TABLE student_documents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX student_documents_student_idx ON student_documents(student_id);
+CREATE INDEX student_documents_school_idx ON student_documents(school_id, created_at DESC);
+
+-- ============================================================================
+-- 042_dashboard_indexes.sql
+-- ============================================================================
+-- Dashboard KPI indexes (§2.1). Add only where EXPLAIN would benefit on a realistic dataset.
+-- These are tenant-scoped composite indexes that the dashboard queries filter on.
+CREATE INDEX IF NOT EXISTS students_school_lifecycle_idx ON students(school_id, lifecycle_status);
+CREATE INDEX IF NOT EXISTS staff_members_school_type_status_idx ON staff_members(school_id, staff_type, employment_status);
+CREATE INDEX IF NOT EXISTS attendance_registers_school_date_idx ON attendance_registers(school_id, attendance_date DESC);
+CREATE INDEX IF NOT EXISTS fee_payments_school_paid_on_idx ON fee_payments(school_id, paid_on DESC) WHERE reversed_at IS NULL;
+CREATE INDEX IF NOT EXISTS fee_invoices_school_year_due_idx ON fee_invoices(school_id, academic_year_id, due_on) WHERE voided_at IS NULL;
+CREATE INDEX IF NOT EXISTS exams_school_year_status_idx ON exams(school_id, academic_year_id, status);
+CREATE INDEX IF NOT EXISTS notices_school_status_available_idx ON notices(school_id, status, available_from DESC);
+CREATE INDEX IF NOT EXISTS leave_requests_school_status_idx ON leave_requests(school_id, status, requested_at DESC);
+
+COMMIT;
