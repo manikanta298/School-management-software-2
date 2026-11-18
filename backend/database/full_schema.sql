@@ -1911,3 +1911,364 @@ ALTER TABLE fee_events ADD CONSTRAINT fee_events_payment_presence_check CHECK(
 ALTER TABLE fee_events ADD CONSTRAINT fee_events_reason_required_check CHECK(
  kind NOT IN ('invoice_voided','payment_reversed','concession_voided','refund_issued') OR (reason IS NOT NULL AND length(trim(reason)) >= 3)
 );
+
+-- ============================================================================
+-- 033_report_cards.sql
+-- ============================================================================
+-- Report card remarks: principal/teacher can store a free-text remark per student per academic year per term.
+-- The mark and grade data itself comes from the existing exams tables; this table only stores the human remark.
+CREATE TABLE report_card_remarks (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ term varchar(40) NOT NULL CHECK(length(trim(term)) BETWEEN 1 AND 40),
+ remark varchar(500) NOT NULL CHECK(length(trim(remark)) BETWEEN 1 AND 500),
+ author_id uuid NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(student_id, academic_year_id, term)
+);
+CREATE INDEX report_card_remarks_student_idx ON report_card_remarks(student_id, academic_year_id);
+
+-- ============================================================================
+-- 034_certificates.sql
+-- ============================================================================
+-- Certificates (bonafide, transfer, study, character). Each issued certificate gets a per-school gap-free
+-- number from school_counters (the 'certificate' series), a snapshot of the student and school profile at
+-- issue time, and a voided_at/void_reason pair for revocation. Reissue creates a new row with a new number;
+-- the old row stays visible as superseded.
+ALTER TABLE school_counters DROP CONSTRAINT school_counters_name_check;
+ALTER TABLE school_counters ADD CONSTRAINT school_counters_name_check CHECK(name IN ('invoice','receipt','refund','certificate'));
+INSERT INTO school_counters(school_id,name,next_value) SELECT id,'certificate',1 FROM schools WHERE NOT EXISTS (SELECT 1 FROM school_counters c WHERE c.school_id=schools.id AND c.name='certificate');
+
+CREATE TABLE certificates_issued (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ certificate_number bigint NOT NULL,
+ type varchar(20) NOT NULL CHECK(type IN ('bonafide','transfer','study','character')),
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ issued_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ issued_at timestamptz NOT NULL DEFAULT now(),
+ snapshot jsonb NOT NULL,
+ voided_at timestamptz,
+ voided_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ void_reason varchar(200),
+ superseded_by uuid REFERENCES certificates_issued(id) ON DELETE SET NULL,
+ UNIQUE(school_id, certificate_number),
+ CHECK((voided_at IS NULL AND voided_by IS NULL AND void_reason IS NULL) OR
+       (voided_at IS NOT NULL AND voided_by IS NOT NULL AND void_reason IS NOT NULL AND length(trim(void_reason)) >= 3))
+);
+CREATE INDEX certificates_student_idx ON certificates_issued(student_id);
+CREATE INDEX certificates_school_type_idx ON certificates_issued(school_id, type);
+
+CREATE FUNCTION assign_certificate_number() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN NEW.certificate_number := next_school_number(NEW.school_id,'certificate'); RETURN NEW; END; $$;
+CREATE TRIGGER certificates_issued_number BEFORE INSERT ON certificates_issued FOR EACH ROW EXECUTE FUNCTION assign_certificate_number();
+
+-- ============================================================================
+-- 035_subject_combinations.sql
+-- ============================================================================
+-- Subject combinations per class: a class may declare which subjects are taught, so report cards and
+-- timetable generation can iterate a fixed set rather than scanning every paper. Light-touch: a link table
+-- with class_id + subject_id, scoped per school (the class and subject tables are already school-scoped).
+CREATE TABLE class_subject_combinations (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ class_id uuid NOT NULL,
+ subject_id uuid NOT NULL,
+ is_compulsory boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(class_id, subject_id),
+ FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE,
+ FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE RESTRICT
+);
+CREATE INDEX class_subject_combinations_class_idx ON class_subject_combinations(class_id);
+CREATE INDEX class_subject_combinations_subject_idx ON class_subject_combinations(subject_id);
+-- Same-school guard: the class and subject must belong to the same school as the row.
+CREATE FUNCTION guard_class_subject_combination() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE cls classes; sub subjects;
+BEGIN
+ SELECT * INTO cls FROM classes WHERE id=NEW.class_id FOR SHARE;
+ SELECT * INTO sub FROM subjects WHERE id=NEW.subject_id FOR SHARE;
+ IF cls.id IS NULL OR sub.id IS NULL OR cls.school_id<>NEW.school_id OR sub.school_id<>NEW.school_id THEN
+  RAISE EXCEPTION 'Class and subject must belong to the same school' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER class_subject_combinations_guard BEFORE INSERT OR UPDATE ON class_subject_combinations FOR EACH ROW EXECUTE FUNCTION guard_class_subject_combination();
+
+-- ============================================================================
+-- 036_staff_homework.sql
+-- ============================================================================
+-- Batch 3 part 1: staff attendance, staff documents, homework attachments and submissions (D1: bytea ≤512 KiB).
+CREATE TABLE staff_attendance (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ attendance_date date NOT NULL CHECK(attendance_date <= CURRENT_DATE),
+ status varchar(10) NOT NULL CHECK(status IN ('present','absent','leave','half_day')),
+ note varchar(200),
+ recorded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(staff_id, attendance_date)
+);
+CREATE INDEX staff_attendance_school_date_idx ON staff_attendance(school_id, attendance_date);
+CREATE INDEX staff_attendance_staff_idx ON staff_attendance(staff_id, attendance_date);
+
+CREATE TABLE staff_documents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX staff_documents_staff_idx ON staff_documents(staff_id);
+
+CREATE TABLE homework_attachments (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX homework_attachments_homework_idx ON homework_attachments(homework_id);
+
+CREATE TABLE homework_submissions (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ note varchar(500),
+ submitted_at timestamptz NOT NULL DEFAULT now(),
+ feedback varchar(1000),
+ feedback_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ feedback_at timestamptz,
+ UNIQUE(homework_id, student_id)
+);
+CREATE INDEX homework_submissions_homework_idx ON homework_submissions(homework_id);
+CREATE INDEX homework_submissions_student_idx ON homework_submissions(student_id);
+
+-- ============================================================================
+-- 037_attendance_exams_timetable_settings.sql
+-- ============================================================================
+-- Batch 3 part 2: attendance corrections queue, exam types, exam principal remarks, timetable periods,
+-- notification preferences. All tenant-scoped; school_id is written explicitly on every insert.
+CREATE TABLE attendance_corrections (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ attendance_date date NOT NULL,
+ requested_status varchar(8) NOT NULL CHECK(requested_status IN ('present','absent','late','excused','half_day')),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason)) >= 3),
+ requested_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ requested_at timestamptz NOT NULL DEFAULT now(),
+ status varchar(10) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+ reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ reviewed_at timestamptz,
+ review_note varchar(200),
+ UNIQUE(student_id, attendance_date)
+);
+CREATE INDEX attendance_corrections_school_status_idx ON attendance_corrections(school_id, status);
+CREATE INDEX attendance_corrections_student_idx ON attendance_corrections(student_id);
+
+CREATE TABLE exam_types (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ name varchar(60) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 60),
+ code varchar(20) NOT NULL CHECK(code ~ '^[A-Z0-9_-]{1,20}$'),
+ UNIQUE(school_id, code)
+);
+CREATE UNIQUE INDEX exam_types_school_name_unique ON exam_types(school_id, lower(name));
+CREATE INDEX exam_types_school_idx ON exam_types(school_id);
+
+CREATE TABLE exam_student_remarks (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ exam_id uuid NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ remark varchar(500) NOT NULL CHECK(length(trim(remark)) BETWEEN 1 AND 500),
+ author_id uuid NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(exam_id, student_id)
+);
+CREATE INDEX exam_student_remarks_exam_idx ON exam_student_remarks(exam_id);
+
+CREATE TABLE timetable_periods (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ day_of_week smallint NOT NULL CHECK(day_of_week BETWEEN 1 AND 7),
+ period_index smallint NOT NULL CHECK(period_index BETWEEN 1 AND 20),
+ start_time time NOT NULL,
+ end_time time NOT NULL CHECK(end_time > start_time),
+ is_break boolean NOT NULL DEFAULT false,
+ label varchar(40),
+ UNIQUE(school_id, day_of_week, period_index)
+);
+CREATE INDEX timetable_periods_school_day_idx ON timetable_periods(school_id, day_of_week, period_index);
+
+CREATE TABLE notification_preferences (
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ channel varchar(20) NOT NULL CHECK(channel IN ('in_app','email','sms')),
+ enabled boolean NOT NULL DEFAULT true,
+ digest varchar(10) NOT NULL DEFAULT 'instant' CHECK(digest IN ('instant','daily','weekly')),
+ PRIMARY KEY(school_id, user_id, channel)
+);
+CREATE INDEX notification_preferences_user_idx ON notification_preferences(user_id);
+
+-- ============================================================================
+-- 038_leave_messages.sql
+-- ============================================================================
+-- Batch 4 part 1: leave management (student + staff) and teacher-parent messaging (D6: Phase 1 includes
+-- student and staff leave; payroll is Phase 2 and NOT included here).
+CREATE TABLE leave_requests (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ person_type varchar(10) NOT NULL CHECK(person_type IN ('student','staff')),
+ person_id uuid NOT NULL,
+ from_date date NOT NULL,
+ to_date date NOT NULL CHECK(to_date >= from_date),
+ reason varchar(500) NOT NULL CHECK(length(trim(reason)) >= 3),
+ status varchar(10) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+ requested_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ requested_at timestamptz NOT NULL DEFAULT now(),
+ reviewed_by uuid REFERENCES users(id) ON DELETE SET NULL,
+ reviewed_at timestamptz,
+ review_note varchar(200),
+ academic_year_id uuid REFERENCES academic_years(id) ON DELETE SET NULL,
+ CHECK((reviewed_at IS NULL) = (reviewed_by IS NULL) OR status='pending')
+);
+CREATE INDEX leave_requests_school_status_idx ON leave_requests(school_id, status);
+CREATE INDEX leave_requests_person_idx ON leave_requests(person_type, person_id);
+
+CREATE TABLE leave_balances (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ staff_id uuid NOT NULL REFERENCES staff_members(id) ON DELETE CASCADE,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE CASCADE,
+ total_days integer NOT NULL CHECK(total_days >= 0),
+ used_days integer NOT NULL DEFAULT 0 CHECK(used_days >= 0 AND used_days <= total_days),
+ UNIQUE(school_id, staff_id, academic_year_id)
+);
+CREATE INDEX leave_balances_staff_idx ON leave_balances(staff_id, academic_year_id);
+
+CREATE TABLE message_threads (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ teacher_id uuid NOT NULL REFERENCES teachers(id) ON DELETE CASCADE,
+ parent_id uuid NOT NULL REFERENCES parents(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(school_id, teacher_id, parent_id, student_id)
+);
+CREATE INDEX message_threads_parent_idx ON message_threads(parent_id);
+CREATE INDEX message_threads_teacher_idx ON message_threads(teacher_id);
+
+CREATE TABLE message_messages (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ thread_id uuid NOT NULL REFERENCES message_threads(id) ON DELETE CASCADE,
+ body varchar(2000) NOT NULL CHECK(length(trim(body)) BETWEEN 1 AND 2000),
+ sent_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ sent_at timestamptz NOT NULL DEFAULT now(),
+ read_at timestamptz
+);
+CREATE INDEX message_messages_thread_idx ON message_messages(thread_id, sent_at);
+CREATE INDEX message_messages_recipient_idx ON message_messages(school_id, sent_at DESC);
+
+-- ============================================================================
+-- 039_mfa_secrets.sql
+-- ============================================================================
+-- Batch 4 part 2: TOTP MFA secrets (D8). The secret is stored as a base32 string; enrollment requires
+-- a fresh login and produces a one-time QR code; verification requires a 6-digit TOTP code.
+-- Backup codes are not generated in this phase.
+CREATE TABLE user_mfa_secrets (
+ user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ secret text NOT NULL,
+ enabled_at timestamptz NOT NULL DEFAULT now(),
+ last_used_at timestamptz
+);
+CREATE INDEX user_mfa_secrets_enabled_idx ON user_mfa_secrets(user_id) WHERE enabled_at IS NOT NULL;
+
+-- ============================================================================
+-- 040_notification_outbox.sql
+-- ============================================================================
+-- Notification outbox (referenced by §2.5 attendance, §2.13 communication, §2.15 certificates,
+-- §2.12 transport expiry, §2.9 homework). Provider delivery is P2; this table records the intent
+-- transactionally with the business action so a worker can pick it up later.
+CREATE TABLE notification_outbox (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ event_type varchar(40) NOT NULL CHECK(length(trim(event_type)) BETWEEN 1 AND 40),
+ channel varchar(10) NOT NULL CHECK(channel IN ('in_app','email','sms','whatsapp')),
+ recipient_ref varchar(254) NOT NULL,
+ template_key varchar(60) NOT NULL CHECK(length(trim(template_key)) BETWEEN 1 AND 60),
+ payload_ref uuid,
+ status varchar(12) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','sent','failed','dead')),
+ attempt_count integer NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+ next_attempt_at timestamptz NOT NULL DEFAULT now(),
+ provider_message_id varchar(200),
+ last_error_code varchar(60),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ sent_at timestamptz
+);
+CREATE INDEX notification_outbox_status_next_idx ON notification_outbox(status, next_attempt_at);
+CREATE INDEX notification_outbox_school_created_idx ON notification_outbox(school_id, created_at DESC);
+CREATE INDEX notification_outbox_recipient_idx ON notification_outbox(school_id, recipient_ref);
+
+CREATE TABLE notification_delivery_attempts (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ outbox_id uuid NOT NULL REFERENCES notification_outbox(id) ON DELETE CASCADE,
+ attempted_at timestamptz NOT NULL DEFAULT now(),
+ success boolean NOT NULL,
+ provider_response_code varchar(20),
+ provider_response_ref varchar(200),
+ error_message varchar(500)
+);
+CREATE INDEX notification_delivery_attempts_outbox_idx ON notification_delivery_attempts(outbox_id, attempted_at);
+
+-- ============================================================================
+-- 041_student_documents.sql
+-- ============================================================================
+-- Student documents (§2.2 P1). Tenant-owned document table with MIME/size guards per D1.
+-- Supports the profile "documents" tab: upload, list, download with tenant-scoped authorization.
+CREATE TABLE student_documents (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ school_id uuid NOT NULL REFERENCES schools(id) ON DELETE CASCADE,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+ name varchar(120) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+ mime varchar(64) NOT NULL CHECK(mime IN ('application/pdf','image/png','image/jpeg')),
+ bytea bytea NOT NULL CHECK(octet_length(bytea) <= 524288),
+ uploaded_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX student_documents_student_idx ON student_documents(student_id);
+CREATE INDEX student_documents_school_idx ON student_documents(school_id, created_at DESC);
+
+-- ============================================================================
+-- 042_dashboard_indexes.sql
+-- ============================================================================
+-- Dashboard KPI indexes (§2.1). Add only where EXPLAIN would benefit on a realistic dataset.
+-- These are tenant-scoped composite indexes that the dashboard queries filter on.
+CREATE INDEX IF NOT EXISTS students_school_lifecycle_idx ON students(school_id, lifecycle_status);
+CREATE INDEX IF NOT EXISTS staff_members_school_type_status_idx ON staff_members(school_id, staff_type, employment_status);
+CREATE INDEX IF NOT EXISTS attendance_registers_school_date_idx ON attendance_registers(school_id, attendance_date DESC);
+CREATE INDEX IF NOT EXISTS fee_payments_school_paid_on_idx ON fee_payments(school_id, paid_on DESC) WHERE reversed_at IS NULL;
+CREATE INDEX IF NOT EXISTS fee_invoices_school_year_due_idx ON fee_invoices(school_id, academic_year_id, due_on) WHERE voided_at IS NULL;
+CREATE INDEX IF NOT EXISTS exams_school_year_status_idx ON exams(school_id, academic_year_id, status);
+CREATE INDEX IF NOT EXISTS notices_school_status_available_idx ON notices(school_id, status, available_from DESC);
+CREATE INDEX IF NOT EXISTS leave_requests_school_status_idx ON leave_requests(school_id, status, requested_at DESC);
+
+COMMIT;
