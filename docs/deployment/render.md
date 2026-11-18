@@ -62,14 +62,14 @@ References: [Render connection guide](https://render.com/docs/postgresql-creatin
 
 ## This project's Vercel frontend and Render API
 
-- Frontend: https://frontend-javx.vercel.app
-- Backend: https://school-management-knrb.onrender.com
-- Frontend proxy health check: https://frontend-javx.vercel.app/api/health
-- Direct backend health check: https://school-management-knrb.onrender.com/api/health
+- Frontend: https://school-management-software-2.vercel.app
+- Backend: https://school-management-software-2.onrender.com
+- Frontend proxy health check: https://school-management-software-2.vercel.app/api/health
+- Direct backend health check: https://school-management-software-2.onrender.com/api/health
 
 Vercel project Root Directory must be `frontend`, production branch `main`, build command `npm run build`, output `dist`. `frontend/vercel.json` forwards `/api/:path*` to Render before the SPA fallback. Browser calls stay on `/api`; keep VITE_API_BASE set to `/api` (remove any old direct Render API URL override in Vercel's environment). The committed config supplies `/api` for builds, but check for existing dashboard overrides.
 
-On the existing Render backend service set FRONTEND_ORIGIN to `https://frontend-javx.vercel.app`, NODE_ENV to `production`, and TRUST_PROXY to `1`. render.yaml now contains this exact origin; manually created services still need their dashboard setting updated. Never use the backend URL as FRONTEND_ORIGIN. A repository push does not edit an existing service's dashboard environment.
+On the existing Render backend service set FRONTEND_ORIGIN to `https://school-management-software-2.vercel.app`, NODE_ENV to `production`, and TRUST_PROXY to `1`. The Render Blueprint now contains this exact origin; manually created services still need their dashboard setting updated. Keep the Vercel `VITE_API_BASE` value at `/api` so refresh cookies stay same-origin. Never use the backend URL as FRONTEND_ORIGIN. A repository push does not edit an existing service's dashboard environment.
 
 The backend now automatically reads `/etc/secrets/ca.pem` if present, or reads an explicitly configured DATABASE_CA_CERT_FILE. The filename must be exactly `ca.pem`, with no quote; the path has no spaces. DATABASE_CA_CERT (inline PEM) takes precedence over file contents, so remove an obsolete inline value when switching to a file. A file read or certificate validation error stops startup. Use only the matching database provider CA bundle; mounting a file cannot fix an incorrect CA chain.
 
