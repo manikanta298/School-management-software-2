@@ -767,3 +767,266 @@ BEGIN
  EXISTS(SELECT 1 FROM exams WHERE academic_year_id=NEW.id AND (start_date<NEW.start_date OR end_date>NEW.end_date)) OR
  EXISTS(SELECT 1 FROM timetable_slots WHERE academic_year_id=NEW.id AND active AND (effective_from<NEW.start_date OR effective_to>NEW.end_date)) THEN RAISE EXCEPTION 'Existing academic records must fit year' USING ERRCODE='23514';END IF;RETURN NEW;
 END; $$;
+
+-- ============================================================================
+-- 009_notices.sql
+-- ============================================================================
+CREATE TABLE notices (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ body varchar(5000) NOT NULL CHECK(length(trim(body))>0),
+ audience varchar(10) NOT NULL DEFAULT 'all' CHECK(audience IN ('all','admin','teacher','student','parent')),
+ class_id uuid,academic_year_id uuid,section_id uuid,
+ priority varchar(10) NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','important','urgent')),
+ available_from timestamptz NOT NULL,expires_at timestamptz CHECK(expires_at>available_from),
+ status varchar(10) NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','published','archived')),
+ version integer NOT NULL DEFAULT 1 CHECK(version>0),content_revision integer NOT NULL DEFAULT 1 CHECK(content_revision>0),
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ updated_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ action_reason varchar(200),created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(section_id IS NULL OR class_id IS NOT NULL),
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) MATCH FULL ON DELETE RESTRICT,
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT
+);
+CREATE INDEX notices_visible_idx ON notices(status,available_from,expires_at);
+CREATE INDEX notices_class_year_idx ON notices(class_id,academic_year_id);
+CREATE INDEX notices_year_idx ON notices(academic_year_id);
+CREATE INDEX notices_section_idx ON notices(section_id,class_id);
+CREATE INDEX notices_creator_idx ON notices(created_by);
+CREATE INDEX notices_actor_idx ON notices(updated_by);
+CREATE TABLE notice_reads (
+ notice_id uuid NOT NULL REFERENCES notices(id) ON DELETE RESTRICT,
+ user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ content_revision integer NOT NULL CHECK(content_revision>0),read_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(notice_id,user_id,content_revision)
+);
+CREATE INDEX notice_reads_user_idx ON notice_reads(user_id,notice_id,content_revision);
+CREATE TABLE notice_audit (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,notice_id uuid NOT NULL REFERENCES notices(id) ON DELETE RESTRICT,
+ action varchar(12) NOT NULL CHECK(action IN ('created','updated','published','unpublished','archived','restored')),
+ previous_values jsonb,new_values jsonb NOT NULL,
+ actor_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,reason varchar(200),occurred_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX notice_audit_notice_idx ON notice_audit(notice_id,id);
+CREATE INDEX notice_audit_actor_idx ON notice_audit(actor_id);
+CREATE FUNCTION guard_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE changed boolean;
+BEGIN
+ IF TG_OP='INSERT' THEN
+ IF NEW.status<>'draft' OR NEW.version<>1 OR NEW.content_revision<>1 THEN RAISE EXCEPTION 'Notices start as draft revision one' USING ERRCODE='23514';END IF;
+ ELSE
+ IF (NEW.id,NEW.created_by,NEW.created_at) IS DISTINCT FROM (OLD.id,OLD.created_by,OLD.created_at) OR NEW.version<>OLD.version+1 THEN RAISE EXCEPTION 'Notice identity/version is protected' USING ERRCODE='23514';END IF;
+ changed=(NEW.title,NEW.body,NEW.audience,NEW.class_id,NEW.academic_year_id,NEW.section_id,NEW.priority,NEW.available_from,NEW.expires_at) IS DISTINCT FROM (OLD.title,OLD.body,OLD.audience,OLD.class_id,OLD.academic_year_id,OLD.section_id,OLD.priority,OLD.available_from,OLD.expires_at);
+ IF changed AND (OLD.status<>'draft' OR NEW.status<>'draft') THEN RAISE EXCEPTION 'Unpublish before editing notice content' USING ERRCODE='23514';END IF;
+ IF NEW.content_revision<>OLD.content_revision+(CASE WHEN changed THEN 1 ELSE 0 END) THEN RAISE EXCEPTION 'Content revision must match content change' USING ERRCODE='23514';END IF;
+ IF NEW.status=OLD.status THEN
+ IF OLD.status<>'draft' THEN RAISE EXCEPTION 'Only draft notices can be saved' USING ERRCODE='23514';END IF;
+ ELSIF OLD.status='draft' AND NEW.status='published' THEN
+ IF NEW.expires_at IS NOT NULL AND NEW.expires_at<=CURRENT_TIMESTAMP THEN RAISE EXCEPTION 'Change expired visibility dates before publication' USING ERRCODE='23514';END IF;
+ ELSIF (OLD.status='published' AND NEW.status='draft') OR (OLD.status IN ('draft','published') AND NEW.status='archived') OR (OLD.status='archived' AND NEW.status='draft') THEN
+ IF NEW.action_reason IS NULL OR length(trim(NEW.action_reason))<3 THEN RAISE EXCEPTION 'Lifecycle action reason required' USING ERRCODE='23514';END IF;
+ ELSE RAISE EXCEPTION 'Invalid notice state transition' USING ERRCODE='23514';END IF;
+ END IF;
+ NEW.updated_at=now();RETURN NEW;
+END; $$;
+CREATE TRIGGER notices_guard BEFORE INSERT OR UPDATE ON notices FOR EACH ROW EXECUTE FUNCTION guard_notice();
+CREATE FUNCTION audit_notice() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE action_name text;
+BEGIN
+ IF TG_OP='INSERT' THEN INSERT INTO notice_audit(notice_id,action,new_values,actor_id) VALUES(NEW.id,'created',to_jsonb(NEW),NEW.created_by);
+ ELSE action_name=CASE WHEN NEW.status=OLD.status THEN 'updated' WHEN NEW.status='published' THEN 'published' WHEN NEW.status='archived' THEN 'archived' WHEN OLD.status='archived' THEN 'restored' ELSE 'unpublished' END;INSERT INTO notice_audit(notice_id,action,previous_values,new_values,actor_id,reason) VALUES(NEW.id,action_name,to_jsonb(OLD),to_jsonb(NEW),NEW.updated_by,NEW.action_reason);END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER notices_audit AFTER INSERT OR UPDATE ON notices FOR EACH ROW EXECUTE FUNCTION audit_notice();
+CREATE TRIGGER notice_audit_protect BEFORE UPDATE OR DELETE ON notice_audit FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE TRIGGER notice_reads_protect BEFORE UPDATE OR DELETE ON notice_reads FOR EACH ROW EXECUTE FUNCTION protect_attendance_audit();
+CREATE FUNCTION guard_notice_read() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE rev integer;
+BEGIN
+ SELECT content_revision INTO rev FROM notices WHERE id=NEW.notice_id FOR SHARE;
+ IF rev IS NULL OR NEW.content_revision<>rev THEN RAISE EXCEPTION 'Acknowledge only the current notice revision' USING ERRCODE='23514';END IF;RETURN NEW;
+END; $$;
+CREATE TRIGGER notice_reads_guard BEFORE INSERT ON notice_reads FOR EACH ROW EXECUTE FUNCTION guard_notice_read();
+
+-- ============================================================================
+-- 010_student_lifecycle.sql
+-- ============================================================================
+ALTER TABLE students
+ ADD COLUMN gender varchar(10) CHECK(gender IN ('female','male','other')),
+ ADD COLUMN blood_group varchar(3) CHECK(blood_group IN ('A+','A-','B+','B-','AB+','AB-','O+','O-')),
+ ADD COLUMN nationality varchar(60),
+ ADD COLUMN present_address varchar(500),
+ ADD COLUMN city varchar(80),
+ ADD COLUMN district varchar(80),
+ ADD COLUMN state varchar(80),
+ ADD COLUMN pin_code varchar(6) CHECK(pin_code ~ '^[0-9]{6}$'),
+ ADD COLUMN previous_school varchar(150),
+ ADD COLUMN previous_class varchar(50),
+ ADD COLUMN lifecycle_status varchar(12) NOT NULL DEFAULT 'active' CHECK(lifecycle_status IN ('active','inactive','transferred','graduated')),
+ ADD COLUMN lifecycle_changed_at timestamptz;
+CREATE INDEX students_lifecycle_idx ON students(lifecycle_status);
+CREATE TABLE student_status_history (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ previous_status varchar(12) NOT NULL CHECK(previous_status IN ('active','inactive','transferred','graduated')),
+ new_status varchar(12) NOT NULL CHECK(new_status IN ('active','inactive','transferred','graduated')),
+ reason varchar(200) NOT NULL CHECK(length(trim(reason))>=3),
+ changed_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ changed_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX student_status_history_student_idx ON student_status_history(student_id,id);
+CREATE INDEX student_status_history_actor_idx ON student_status_history(changed_by);
+CREATE FUNCTION protect_student_status_history() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Student status history is append-only' USING ERRCODE='23514'; END; $$;
+CREATE TRIGGER student_status_history_protect BEFORE UPDATE OR DELETE ON student_status_history FOR EACH ROW EXECUTE FUNCTION protect_student_status_history();
+
+-- ============================================================================
+-- 011_staff.sql
+-- ============================================================================
+CREATE TABLE staff_members (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ employee_number varchar(30) NOT NULL UNIQUE CHECK(employee_number ~ '^[A-Z0-9_-]{1,30}$'),
+ name varchar(100) NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 100),
+ staff_type varchar(20) NOT NULL CHECK(staff_type IN ('accountant','receptionist','administrative','transport','librarian','attender','security')),
+ phone varchar(30) CHECK(phone IS NULL OR phone ~ '^[+0-9() .-]{7,30}$'),
+ email varchar(254) CHECK(email IS NULL OR email=lower(email)),
+ address varchar(500),
+ joining_date date NOT NULL CHECK(joining_date<=CURRENT_DATE),
+ employment_status varchar(8) NOT NULL DEFAULT 'active' CHECK(employment_status IN ('active','inactive')),
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX staff_members_type_status_idx ON staff_members(staff_type,employment_status);
+
+-- ============================================================================
+-- 012_fee_categories.sql
+-- ============================================================================
+ALTER TABLE fee_payments DROP CONSTRAINT fee_payments_method_check;
+ALTER TABLE fee_payments ADD CONSTRAINT fee_payments_method_check CHECK(method IN ('cash','upi','bank_transfer','cheque','online','other'));
+ALTER TABLE fee_structures ADD COLUMN category varchar(20) NOT NULL DEFAULT 'miscellaneous' CHECK(category IN ('admission','tuition','term','examination','transport','books','uniform','activity','miscellaneous'));
+
+-- ============================================================================
+-- 013_attendance_half_day.sql
+-- ============================================================================
+ALTER TABLE attendance_entries DROP CONSTRAINT attendance_entries_status_check;
+ALTER TABLE attendance_entries ADD CONSTRAINT attendance_entries_status_check CHECK(status IN ('present','absent','late','half_day','excused','void'));
+ALTER TABLE attendance_audit DROP CONSTRAINT attendance_audit_previous_status_check;
+ALTER TABLE attendance_audit ADD CONSTRAINT attendance_audit_previous_status_check CHECK(previous_status IS NULL OR previous_status IN ('present','absent','late','half_day','excused','void'));
+ALTER TABLE attendance_audit DROP CONSTRAINT attendance_audit_new_status_check;
+ALTER TABLE attendance_audit ADD CONSTRAINT attendance_audit_new_status_check CHECK(new_status IN ('present','absent','late','half_day','excused','void'));
+
+-- ============================================================================
+-- 014_homework.sql
+-- ============================================================================
+CREATE TABLE homework (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ section_id uuid NOT NULL,
+ class_id uuid NOT NULL,
+ academic_year_id uuid NOT NULL,
+ subject_id uuid NOT NULL REFERENCES subjects(id) ON DELETE RESTRICT,
+ teacher_id uuid REFERENCES teachers(id) ON DELETE RESTRICT,
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ details varchar(5000) NOT NULL CHECK(length(trim(details))>0),
+ assigned_on date NOT NULL,
+ due_on date NOT NULL,
+ archived_at timestamptz,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(due_on>=assigned_on),
+ FOREIGN KEY(section_id,class_id) REFERENCES sections(id,class_id) ON DELETE RESTRICT,
+ FOREIGN KEY(class_id,academic_year_id) REFERENCES classes(id,academic_year_id) ON DELETE RESTRICT
+);
+CREATE INDEX homework_section_due_idx ON homework(section_id,due_on);
+CREATE INDEX homework_class_year_idx ON homework(class_id,academic_year_id);
+CREATE INDEX homework_subject_idx ON homework(subject_id);
+CREATE INDEX homework_teacher_idx ON homework(teacher_id);
+CREATE INDEX homework_creator_idx ON homework(created_by);
+CREATE TABLE homework_completions (
+ homework_id uuid NOT NULL REFERENCES homework(id) ON DELETE RESTRICT,
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ completed_at timestamptz NOT NULL DEFAULT now(),
+ PRIMARY KEY(homework_id,student_id)
+);
+CREATE INDEX homework_completions_student_idx ON homework_completions(student_id);
+
+-- ============================================================================
+-- 015_transport.sql
+-- ============================================================================
+CREATE TABLE transport_vehicles (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ registration_number varchar(20) NOT NULL UNIQUE CHECK(registration_number ~ '^[A-Z0-9 -]{4,20}$'),
+ capacity integer NOT NULL CHECK(capacity BETWEEN 1 AND 200),
+ driver_name varchar(100) CHECK(driver_name IS NULL OR length(trim(driver_name))>0),
+ driver_phone varchar(30) CHECK(driver_phone IS NULL OR driver_phone ~ '^[+0-9() .-]{7,30}$'),
+ insurance_expiry date,
+ permit_expiry date,
+ active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE transport_routes (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ vehicle_id uuid REFERENCES transport_vehicles(id) ON DELETE RESTRICT,
+ active boolean NOT NULL DEFAULT true,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX transport_routes_name_unique ON transport_routes(lower(name));
+CREATE INDEX transport_routes_vehicle_idx ON transport_routes(vehicle_id);
+CREATE TABLE transport_stops (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ route_id uuid NOT NULL REFERENCES transport_routes(id) ON DELETE RESTRICT,
+ name varchar(100) NOT NULL CHECK(length(trim(name))>0),
+ sequence integer NOT NULL CHECK(sequence BETWEEN 1 AND 200),
+ UNIQUE(route_id,sequence)
+);
+CREATE TABLE transport_allocations (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ student_id uuid NOT NULL REFERENCES students(id) ON DELETE RESTRICT,
+ stop_id uuid NOT NULL REFERENCES transport_stops(id) ON DELETE RESTRICT,
+ academic_year_id uuid NOT NULL REFERENCES academic_years(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ UNIQUE(student_id,academic_year_id)
+);
+CREATE INDEX transport_allocations_stop_idx ON transport_allocations(stop_id);
+CREATE INDEX transport_allocations_year_idx ON transport_allocations(academic_year_id);
+CREATE FUNCTION validate_transport_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE vehicle uuid; seats integer; used integer;
+BEGIN
+ SELECT r.vehicle_id INTO vehicle FROM transport_stops s JOIN transport_routes r ON r.id=s.route_id WHERE s.id=NEW.stop_id;
+ IF vehicle IS NULL THEN RETURN NEW; END IF;
+ SELECT capacity INTO seats FROM transport_vehicles WHERE id=vehicle FOR UPDATE;
+ SELECT count(*) INTO used FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle AND a.academic_year_id=NEW.academic_year_id AND a.id<>NEW.id;
+ IF used>=seats THEN RAISE EXCEPTION 'Vehicle capacity reached' USING ERRCODE='23514'; END IF;
+ RETURN NEW;
+END; $$;
+CREATE TRIGGER transport_allocations_validate BEFORE INSERT OR UPDATE ON transport_allocations FOR EACH ROW EXECUTE FUNCTION validate_transport_allocation();
+CREATE FUNCTION check_vehicle_load(vehicle uuid) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+ IF EXISTS(SELECT 1 FROM transport_allocations a JOIN transport_stops s ON s.id=a.stop_id JOIN transport_routes r ON r.id=s.route_id WHERE r.vehicle_id=vehicle GROUP BY a.academic_year_id HAVING count(*)>(SELECT capacity FROM transport_vehicles WHERE id=vehicle)) THEN
+ RAISE EXCEPTION 'Vehicle capacity is below its allocated students' USING ERRCODE='23514'; END IF;
+END; $$;
+CREATE FUNCTION transport_vehicle_load_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF NEW.vehicle_id IS NOT NULL THEN PERFORM check_vehicle_load(NEW.vehicle_id); END IF; RETURN NEW; END; $$;
+CREATE TRIGGER transport_routes_load AFTER UPDATE OF vehicle_id ON transport_routes FOR EACH ROW EXECUTE FUNCTION transport_vehicle_load_guard();
+CREATE FUNCTION transport_capacity_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN PERFORM check_vehicle_load(NEW.id); RETURN NEW; END; $$;
+CREATE TRIGGER transport_vehicles_capacity AFTER UPDATE OF capacity ON transport_vehicles FOR EACH ROW EXECUTE FUNCTION transport_capacity_guard();
+
+-- ============================================================================
+-- 016_school_events.sql
+-- ============================================================================
+CREATE TABLE school_events (
+ id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+ title varchar(150) NOT NULL CHECK(length(trim(title))>0),
+ description varchar(1000),
+ event_type varchar(10) NOT NULL CHECK(event_type IN ('holiday','event','exam','meeting')),
+ starts_on date NOT NULL,
+ ends_on date NOT NULL,
+ created_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+ created_at timestamptz NOT NULL DEFAULT now(),
+ updated_at timestamptz NOT NULL DEFAULT now(),
+ CHECK(ends_on>=starts_on)
+);
+CREATE INDEX school_events_dates_idx ON school_events(starts_on,ends_on);
+CREATE INDEX school_events_creator_idx ON school_events(created_by);
