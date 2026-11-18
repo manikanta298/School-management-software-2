@@ -1,0 +1,10 @@
+import { z } from 'zod';
+const id=z.uuid();
+const date=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !Number.isNaN(d.getTime())&&d.toISOString().slice(0,10)===v;},'Invalid calendar date');
+const month=z.string().regex(/^\d{4}-\d{2}$/).refine(v=>{const d=new Date(v+'-01T00:00:00Z');return !Number.isNaN(d.getTime());},'Invalid month (YYYY-MM)');
+const text=max=>z.string().trim().max(max).regex(/^[^<>\x00-\x1f]*$/u);
+export const alertsQuery=z.object({from:date.optional(),to:date.optional(),section_id:id.optional(),threshold:z.coerce.number().min(0).max(100).default(75)}).strict();
+export const monthlyQuery=z.object({section_id:id,month}).strict();
+export const correctionBody=z.object({student_id:id,attendance_date:date,requested_status:z.enum(['present','absent','late','excused','half_day']),reason:text(200).min(3)}).strict();
+export const reviewBody=z.object({decision:z.enum(['approved','rejected']),note:text(200).nullable().optional().transform(v=>v||null)}).strict();
+export const correctionListQuery=z.object({status:z.enum(['pending','approved','rejected']).optional(),limit:z.coerce.number().int().min(1).max(100).default(25),offset:z.coerce.number().int().min(0).default(0)}).strict();

@@ -1,0 +1,58 @@
+import React,{useState} from 'react';
+import { STAFF_ROLES } from '../api/permissions';
+import {GraduationCap,LayoutDashboard,Users,ContactRound,Briefcase,BookOpen,ClipboardCheck,CalendarDays,CalendarRange,Award,Bus,NotebookPen,Wallet,Megaphone,ShieldCheck,Settings2,LogOut,Menu,X,Bell,ArrowRight,FileText,Certificate,MessageSquare,CalendarOff} from 'lucide-react';
+// STAFF_NAV lists every staff-navigation entry. The filter below keeps only the ones the role
+// has view permission for, plus the always-visible tools (certificates, report cards, reports,
+// leave, messages, settings) whose visibility is decided by the role itself, not the matrix.
+const STAFF_NAV=[
+ ['students','Students & parents',Users],['teachers','Teachers',ContactRound],['staff','Staff',Briefcase],['transport','Transport',Bus],
+ ['academic','Academic setup',BookOpen],['attendance','Attendance',ClipboardCheck],['timetable','Timetable',CalendarDays],['calendar','School calendar',CalendarRange],
+ ['homework','Homework',NotebookPen],['exams','Exams & results',Award],['fees','Fees & invoices',Wallet],['notices','Notices',Megaphone],
+ ['certificates','Certificates',Certificate],['reportcards','Report cards',FileText],['reports','Reports',FileText],['leave','Leave',CalendarOff],['messages','Messages',MessageSquare],['settings','Settings',Settings2]
+];
+// Staff roles that always see these tools regardless of the module matrix.
+const ALWAYS_FOR_STAFF={certificates:['principal'],reportcards:['principal','receptionist'],reports:['principal','accountant'],leave:['principal'],settings:['principal']};
+function staffVisible(role,permissions,page){
+ if(ALWAYS_FOR_STAFF[page]?.includes(role))return true;
+ return Boolean(permissions?.[page]?.includes('view'));
+}
+export const navigationFor=(role,permissions)=>{
+ if(STAFF_ROLES.includes(role)){
+  return [{page:'dashboard',label:'Overview',Icon:LayoutDashboard},
+   ...STAFF_NAV.filter(([page])=>staffVisible(role,permissions,page)).map(([page,label,Icon])=>({page,label,Icon})),
+   {page:'password',label:'Security',Icon:Settings2}];
+ }
+ return [
+  {page:'dashboard',label:'Overview',Icon:LayoutDashboard},
+  ...(role==='parent'?[{page:'portal',label:'My children',Icon:Users}]:[]),
+  ...(role!=='teacher'?[{page:'students',label:role==='admin'?'Students & parents':role==='parent'?'My family':'My profile',Icon:Users}]:[]),
+  ...(['admin','teacher'].includes(role)?[{page:'teachers',label:role==='admin'?'Teachers':'My teaching',Icon:ContactRound}]:[]),
+  ...(role==='admin'?[{page:'staff',label:'Staff',Icon:Briefcase}]:[]),
+  ...(role!=='teacher'?[{page:'transport',label:'Transport',Icon:Bus}]:[]),
+  {page:'academic',label:'Academic setup',Icon:BookOpen},
+  {page:'attendance',label:'Attendance',Icon:ClipboardCheck},
+  {page:'timetable',label:'Timetable',Icon:CalendarDays},
+  {page:'calendar',label:'School calendar',Icon:CalendarRange},
+  {page:'homework',label:'Homework',Icon:NotebookPen},
+  {page:'exams',label:'Exams & results',Icon:Award},
+  ...(role!=='teacher'?[{page:'fees',label:role==='admin'?'Fees & invoices':'My fees',Icon:Wallet}]:[]),
+  {page:'notices',label:'Notices',Icon:Megaphone},
+  ...(role==='parent'?[{page:'messages',label:'Messages',Icon:MessageSquare}]:[]),
+  ...(role==='admin'||role==='principal'?[
+   {page:'certificates',label:'Certificates',Icon:Certificate},
+   {page:'reportcards',label:'Report cards',Icon:FileText},
+   {page:'reports',label:'Reports',Icon:FileText},
+   {page:'leave',label:'Leave',Icon:CalendarOff},
+   {page:'settings',label:'Settings',Icon:Settings2}
+  ]:[]),
+  ...(role==='admin'?[{page:'users',label:'User accounts',Icon:ShieldCheck}]:[]),
+  {page:'password',label:'Security',Icon:Settings2}
+ ];
+};
+export default function AppShell({user,page,onNavigate,onLogout,busy,schools=[],activeSchoolId,onSwitchSchool,children}){
+ const [open,setOpen]=useState(false);
+ if(!user)return <div className="auth-shell"><header className="auth-brand"><GraduationCap size={28} aria-hidden="true"/><strong>School Management</strong></header><main id="main-content" className="auth-main"><div className="auth-intro"><span className="eyebrow">One connected school</span><h1>A clearer view.<br/>A better school day.</h1><p>One workspace for your school, teachers, students and families.</p><div className="auth-art" aria-hidden="true"><div/><div/><div/></div><span className="muted">Learning, connected.</span></div><div className="auth-form">{children}</div></main></div>;
+ const nav=navigationFor(user.role,user.permissions),active=nav.find(n=>n.page===page);
+ function go(target){onNavigate(target);setOpen(false);}
+ return <div className="app-shell"><a href="#main-content" className="skip-link">Skip to main content</a><aside className={`sidebar ${open?'is-open':''}`} id="school-sidebar" onKeyDown={e=>{if(e.key==='Escape')setOpen(false);}}><div className="brand"><GraduationCap size={30} aria-hidden="true"/><span>School<small>MANAGEMENT</small></span><button className="icon-button sidebar-close" onClick={()=>setOpen(false)} aria-label="Close navigation"><X size={20}/></button></div><p className="nav-label">School workspace</p><nav className="sidebar-nav" aria-label="Main navigation">{nav.map(({page:target,label,Icon})=><button key={target} type="button" className={`nav-item ${target===page?'active':''}`} aria-current={target===page?'page':undefined} onClick={()=>go(target)}><Icon size={18} aria-hidden="true"/><span>{label}</span></button>)}</nav>{schools.length>1&&<label className="school-switch"><small>School</small><select value={activeSchoolId||''} onChange={e=>onSwitchSchool(e.target.value)} disabled={busy} aria-label="Switch school">{schools.map(s=><option key={s.id} value={s.id}>{s.name} ({s.role})</option>)}</select></label>}<div className="sidebar-user"><span className="avatar" aria-hidden="true">{user.name.split(' ').map(n=>n[0]).slice(0,2).join('')}</span><span><strong>{user.name}</strong><small>{user.role} workspace</small></span></div><button className="nav-item signout" onClick={onLogout} disabled={busy}><LogOut size={17} aria-hidden="true"/>Sign out</button></aside><div className="workspace"><header className="workspace-header"><div className="breadcrumb"><button className="icon-button mobile-menu" aria-label="Toggle navigation" aria-expanded={open} aria-controls="school-sidebar" onClick={()=>setOpen(v=>!v)}><Menu size={21}/></button><span>Workspace</span><span aria-hidden="true">/</span><strong>{active?.label||'Overview'}</strong></div><div className="header-actions"><span className="workspace-role">{user.role} workspace</span><button className="icon-button" aria-label="Open notices" onClick={()=>go('notices')}><Bell size={19}/></button><span className="avatar" aria-hidden="true">{user.name[0]}</span></div></header><main id="main-content" className="workspace-main" tabIndex={-1}>{children}</main><footer className="workspace-footer"><span>School Management</span><span>One connected school <ArrowRight size={13} aria-hidden="true"/></span></footer></div></div>;
+}

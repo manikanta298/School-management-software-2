@@ -1,0 +1,35 @@
+import { Router } from 'express';
+import { moduleAccess } from '../middleware/permissions.js';
+import { authenticate,authorize } from '../middleware/auth.js';
+import { validate } from '../validators/auth.js';
+import * as v from '../validators/attendance.js';
+import * as ev from '../validators/attendanceExt.js';
+import * as c from '../controllers/attendance.js';
+import * as ext from '../models/attendanceExt.js';
+export const attendanceRouter=Router();
+attendanceRouter.use(authenticate,moduleAccess('attendance'),(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
+const staff=authorize('admin','teacher');
+const query=schema=>(req,res,next)=>{const parsed=schema.safeParse(req.query);if(!parsed.success)return res.status(400).json({message:'Invalid dates, range or pagination. Choose up to 366 inclusive days.'});req.attendanceQuery=parsed.data;next();};
+attendanceRouter.param('id',(req,res,next,value)=>v.id.safeParse(value).success?next():res.status(400).json({message:'Invalid student ID'}));
+attendanceRouter.get('/calendar',c.calendar);
+attendanceRouter.get('/sections',staff,query(v.sectionsQuery),c.sections);
+attendanceRouter.get('/register',staff,query(v.registerQuery),c.register);
+attendanceRouter.put('/register',staff,validate(v.save),c.save);
+attendanceRouter.get('/summary',staff,query(v.summaryQuery),c.summary);
+attendanceRouter.get('/audit',authorize('admin'),query(v.registerQuery),c.audit);
+attendanceRouter.get('/students/:id',authorize('admin','student','parent'),query(v.studentQuery),c.history);
+// Batch 3.2: alerts, monthly report, corrections queue
+attendanceRouter.get('/alerts',staff,async(req,res)=>{const q=ev.alertsQuery.safeParse(req.query);if(!q.success)return res.status(400).json({message:'Invalid query'});res.json({items:await ext.alerts(req.schoolId,q.data)});});
+attendanceRouter.get('/reports/monthly',staff,async(req,res)=>{const q=ev.monthlyQuery.safeParse(req.query);if(!q.success)return res.status(400).json({message:'Invalid query'});res.json({items:await ext.monthly(req.schoolId,q.data)});});
+attendanceRouter.get('/corrections',async(req,res)=>{const q=ev.correctionListQuery.safeParse(req.query);if(!q.success)return res.status(400).json({message:'Invalid query'});res.json({items:await ext.listCorrections(req.schoolId,q.data)});});
+attendanceRouter.post('/corrections',staff,validate(ev.correctionBody),async(req,res,next)=>{try{res.status(201).json({item:await ext.createCorrection(req.schoolId,req.user.id,req.body)});}catch(e){next(e);}});
+attendanceRouter.param('correctionId',(req,res,next,value)=>v.id.safeParse(value).success?next():res.status(400).json({message:'Invalid correction ID'}));
+attendanceRouter.post('/corrections/:correctionId/approve',authorize('admin'),validate(ev.reviewBody),async(req,res,next)=>{try{res.json({item:await ext.reviewCorrection(req.schoolId,req.params.correctionId,req.user.id,'approved',req.body.note)});}catch(e){next(e);}});
+attendanceRouter.post('/corrections/:correctionId/reject',authorize('admin'),validate(ev.reviewBody),async(req,res,next)=>{try{res.json({item:await ext.reviewCorrection(req.schoolId,req.params.correctionId,req.user.id,'rejected',req.body.note)});}catch(e){next(e);}});
+attendanceRouter.use((err,_req,res,next)=>{
+ if(err.code==='23505')return res.status(409).json({message:'Student already has attendance on this date, or a correction already exists for this date. Reload the register; void an incorrect saved mark before recording in another section.'});
+ if(err.code==='23503')return res.status(409).json({message:'Missing reference or attendance history protects this record'});
+ if(err.code==='23514')return res.status(400).json({message:'Invalid attendance date, enrollment, status or correction reason'});
+ if(['40001','40P01'].includes(err.code))return res.status(409).json({message:'Concurrent change. Reload and retry.'});
+ next(err);
+});

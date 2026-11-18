@@ -1,0 +1,12 @@
+import { z } from 'zod';
+const id=z.uuid();
+const amount=z.number().int().min(1).max(1000000000);
+const text=max=>z.string().trim().max(max).regex(/^[^<>\x00-\x1f]*$/u);
+const date=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !Number.isNaN(d.getTime())&&d.toISOString().slice(0,10)===v;},'Invalid calendar date');
+export const concession=z.object({amount_minor:amount,reason:text(200).min(3)}).strict();
+export const concessionVoid=z.object({reason:text(200).min(3)}).strict();
+export const instalment=z.object({due_on:date,amount_minor:amount,position:z.number().int().min(0).max(100).default(0)}).strict();
+export const instalments=z.object({instalments:z.array(instalment).max(24)}).strict();
+export const penalty=z.object({rule:z.enum(['late_flat','late_percentage','manual']),amount_minor:amount,applied_on:date,reason:text(200).nullable().optional().transform(v=>v||null)}).strict();
+export const refund=z.object({payment_id:id,amount_minor:amount,reason:text(200).min(3)}).strict();
+export const statementQuery=z.object({from:date.optional(),to:date.optional()}).strict().refine(v=>!v.from||!v.to||v.from<=v.to,{message:'from must precede to',path:['to']});

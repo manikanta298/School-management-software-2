@@ -1,0 +1,12 @@
+import { Router } from 'express';
+import { authenticate,authorize } from '../middleware/auth.js';
+import * as v from '../validators/leave.js';
+import * as model from '../models/leave.js';
+export const messagesRouter=Router();
+messagesRouter.use(authenticate,authorize('admin','principal','teacher','parent'),(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
+const validate=schema=>(req,res,next)=>{const r=schema.safeParse(req.body);if(!r.success)return res.status(400).json({message:'Invalid input'});req.body=r.data;next();};
+messagesRouter.param('threadId',(req,res,next,value)=>v.messageThreadBody.shape.teacher_id.safeParse(value).success?next():res.status(400).json({message:'Invalid thread ID'}));
+messagesRouter.get('/threads',async(req,res)=>res.json({items:await model.listThreads(req.user,req.schoolId)}));
+messagesRouter.post('/threads',validate(v.messageThreadBody),async(req,res,next)=>{try{res.status(201).json({item:await model.createThread(req.schoolId,req.user.id,req.body)});}catch(e){next(e);}});
+messagesRouter.get('/threads/:threadId',async(req,res,next)=>{try{res.json({items:await model.listMessages(req.schoolId,req.params.threadId,req.user)});}catch(e){next(e);}});
+messagesRouter.post('/threads/:threadId',validate(v.messageBody),async(req,res,next)=>{try{res.status(201).json({item:await model.sendMessage(req.schoolId,req.params.threadId,req.user.id,req.user,req.body.body)});}catch(e){next(e);}});

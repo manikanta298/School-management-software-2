@@ -1,0 +1,10 @@
+import { z } from 'zod';
+const id=z.uuid();
+const date=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !Number.isNaN(d.getTime())&&d.toISOString().slice(0,10)===v;},'Invalid calendar date');
+const text=max=>z.string().trim().max(max).regex(/^[^<>\x00-\x1f]*$/u);
+export const leaveBody=z.object({person_type:z.enum(['student','staff']),person_id:id,from_date:date,to_date:date,reason:text(500).min(3),academic_year_id:id.nullable().optional().transform(v=>v??null)}).strict().refine(v=>v.to_date>=v.from_date,{message:'to_date must follow from_date',path:['to_date']});
+export const reviewBody=z.object({note:text(200).nullable().optional().transform(v=>v||null)}).strict();
+export const leaveListQuery=z.object({status:z.enum(['pending','approved','rejected']).optional(),person_type:z.enum(['student','staff']).optional(),person_id:id.optional(),limit:z.coerce.number().int().min(1).max(100).default(25),offset:z.coerce.number().int().min(0).default(0)}).strict();
+export const balanceBody=z.object({staff_id:id,academic_year_id:id,total_days:z.number().int().min(0).max(365)}).strict();
+export const messageBody=z.object({thread_id:id,body:text(2000).min(1)}).strict();
+export const messageThreadBody=z.object({teacher_id:id,parent_id:id,student_id:id}).strict();

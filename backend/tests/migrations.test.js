@@ -1,0 +1,42 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {PGlite} from '@electric-sql/pglite';
+import request from 'supertest';
+process.env.NODE_ENV='test';process.env.JWT_SECRET='migration-test-secret'.repeat(4);process.env.DATABASE_URL='postgres://test:test@localhost/test';process.env.FRONTEND_ORIGIN='http://localhost:5173';
+const {pool}=await import('../src/config/db.js');
+test('startup migrates, bootstraps administrator, authenticates and safely repeats',async()=>{
+ const db=new PGlite();const originalEnd=pool.end.bind(pool);
+ const query=async(text,params)=>{const r=params?await db.query(text,params):(await db.exec(text)).at(-1);return {...r,rowCount:r.rows.length||r.affectedRows||0};};
+ pool.query=query;pool.connect=async()=>({query,release(){}});pool.end=async()=>{};
+ try{
+  const {runMigrations}=await import('../database/run-migrations.js');
+  await runMigrations(pool);
+  const {app}=await import('../src/app.js');
+  const invalid=await request(app).post('/api/auth/login').send({email:'nobody@example.com',password:'NoAccountPassword!123'});
+  assert.equal(invalid.status,401);
+  const {bootstrapAdmin}=await import('../database/bootstrap-admin.js');
+  const source={ADMIN_NAME:'Admin',ADMIN_EMAIL:'Startup-Admin@Example.com',ADMIN_PASSWORD:'StartupPassword!123'};
+  assert.equal(await bootstrapAdmin(pool,{}),'not-configured');
+  await assert.rejects(bootstrapAdmin(pool,{ADMIN_EMAIL:'admin@example.com',ADMIN_PASSWORD:'private-invalid'}), error => !error.message.includes('private-invalid'));
+  assert.equal(await bootstrapAdmin(pool,source),'created');
+  assert.equal(await bootstrapAdmin(pool,{...source,ADMIN_PASSWORD:'DifferentPassword!123'}),'existing');
+  const saved=await query('SELECT password_hash FROM users WHERE email=$1',['startup-admin@example.com']);
+  assert.notEqual(saved.rows[0].password_hash, source.ADMIN_PASSWORD);
+  await query("INSERT INTO users(name,email,password_hash,role,active) VALUES($1,$2,$3,'teacher',false)",['Teacher','existing@example.com',saved.rows[0].password_hash]);
+  assert.equal(await bootstrapAdmin(pool,{...source,ADMIN_EMAIL:'existing@example.com'}),'existing');
+  const existing=await query('SELECT role,active FROM users WHERE email=$1',['existing@example.com']);
+  assert.equal(existing.rows[0].role,'teacher');assert.equal(existing.rows[0].active,false);
+  const login=await request(app).post('/api/auth/login').send({email:'startup-admin@example.com',password:'StartupPassword!123'});
+  assert.equal(login.status,200);
+  assert.ok(login.body.accessToken);
+  const cookie=login.headers['set-cookie'][0].split(';')[0];
+  const refreshed=await request(app).post('/api/auth/refresh').set('Cookie',cookie).set('Origin','http://localhost:5173');
+  assert.equal(refreshed.status,200);
+  await query("INSERT INTO academic_years(name,start_date,end_date,school_id) SELECT $1,$2,$3,id FROM schools WHERE slug='existing-school'",['Persisted year','2026-01-01','2026-12-31']);
+  await import('../database/migrate.js?repeat');
+    const migrations=await query('SELECT name FROM schema_migrations ORDER BY name');assert.deepEqual(migrations.rows.map(r=>r.name),['001_auth.sql','002_academic.sql','003_students_parents.sql','004_teachers.sql','005_attendance.sql','006_fees.sql','007_exams.sql','008_timetable.sql','009_notices.sql','010_student_lifecycle.sql','011_staff.sql','012_fee_categories.sql','013_attendance_half_day.sql','014_homework.sql','015_transport.sql','016_school_events.sql','017_transport_capacity_guards.sql','018_multi_tenant_foundation.sql','019_transport_tenant_integrity.sql','020_academic_tenant_integrity.sql','021_student_parent_tenant_integrity.sql','022_teacher_staff_tenant_integrity.sql','023_attendance_tenant_integrity.sql','024_fees_tenant_integrity.sql','025_exams_tenant_integrity.sql','026_audit_triggers_school_id.sql','027_session_management_login_history.sql','028_per_school_numbering.sql','029_must_change_password.sql','030_staff_roles.sql','031_school_profiles.sql','032_fees_carryover.sql','033_report_cards.sql','034_certificates.sql','035_subject_combinations.sql','036_staff_homework.sql','037_attendance_exams_timetable_settings.sql','038_leave_messages.sql','039_mfa_secrets.sql']);
+  const tenant=await query("SELECT s.slug,m.role FROM schools s JOIN school_memberships m ON m.school_id=s.id JOIN users u ON u.id=m.user_id WHERE u.email='startup-admin@example.com'");assert.deepEqual(tenant.rows,[{slug:'existing-school',role:'admin'}]);
+  const session=await query("SELECT active_school_id FROM auth_sessions WHERE user_id=(SELECT id FROM users WHERE email='startup-admin@example.com') ORDER BY created_at DESC LIMIT 1");assert.ok(session.rows[0].active_school_id);
+  const data=await query('SELECT name FROM academic_years');assert.equal(data.rows[0].name,'Persisted year');
+ }finally{await db.close();await originalEnd();}
+});

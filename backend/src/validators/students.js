@@ -1,0 +1,26 @@
+import { z } from 'zod';
+const text=z.string().trim().max(500).regex(/^[^<>\x00-\x08\x0b\x0c\x0e-\x1f]*$/u);
+const date=z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(v=>{const d=new Date(v+'T00:00:00Z');return !Number.isNaN(d.getTime())&&d.toISOString().slice(0,10)===v;},'Invalid calendar date');
+const optionalText=text.nullable().optional().transform(v=>v||null);
+const shortText=max=>z.string().trim().max(max).regex(/^[^<>\x00-\x08\x0b\x0c\x0e-\x1f]*$/u).nullable().optional().transform(v=>v||null);
+const profileFields={gender:z.enum(['female','male','other']).nullable().optional().transform(v=>v??null),blood_group:z.enum(['A+','A-','B+','B-','AB+','AB-','O+','O-']).nullable().optional().transform(v=>v??null),nationality:shortText(60),present_address:optionalText,city:shortText(80),district:shortText(80),state:shortText(80),pin_code:z.string().trim().regex(/^[0-9]{6}$/).nullable().optional().transform(v=>v??null),previous_school:shortText(150),previous_class:shortText(50)};
+const studentFields={admission_number:z.string().trim().toUpperCase().regex(/^[A-Z0-9_-]{1,30}$/),admission_date:date,date_of_birth:date.nullable().optional().transform(v=>v??null),address:optionalText,...profileFields};
+const parentFields={phone:z.string().trim().regex(/^[+0-9() .-]{7,30}$/).nullable().optional().transform(v=>v??null),address:optionalText};
+const studentSchema=s=>s.refine(v=>!v.date_of_birth||v.date_of_birth<=v.admission_date,{message:'Birth date must be on or before admission',path:['date_of_birth']});
+export const studentCreate=studentSchema(z.object({user_id:z.uuid(),...studentFields}).strict());
+export const studentUpdate=studentSchema(z.object(studentFields).strict());
+export const parentCreate=z.object({user_id:z.uuid(),...parentFields}).strict();
+export const parentUpdate=z.object(parentFields).strict();
+export const link=z.object({parent_id:z.uuid(),relationship:z.enum(['mother','father','guardian','other'])}).strict();
+export const enrollment=z.object({academic_year_id:z.uuid(),section_id:z.uuid(),enrolled_on:date,status:z.enum(['active','withdrawn','completed']).default('active')}).strict();
+export const id=z.uuid();
+export const statusChange=z.object({status:z.enum(['active','inactive','transferred','graduated']),reason:z.string().trim().min(3).max(200).regex(/^[^<>\x00-\x08\x0b\x0c\x0e-\x1f]*$/u)}).strict();
+export const listQuery=z.object({limit:z.coerce.number().int().min(1).max(100).default(25),offset:z.coerce.number().int().min(0).default(0),q:z.string().trim().max(100).default(''),parent_id:z.uuid().optional(),academic_year_id:z.uuid().optional(),section_id:z.uuid().optional(),status:z.enum(['active','inactive','transferred','graduated']).optional()}).strict();
+const updatable=['date_of_birth','address',...Object.keys(profileFields)];
+export const bulkColumns=updatable;
+const exportedReferenceFields={name:z.string().trim().min(1).max(100).optional(),email:z.email().max(254).optional(),lifecycle_status:z.enum(['active','inactive','transferred','graduated']).optional(),admission_date:date.optional()};
+const bulkRowSchema=z.object({admission_number:studentFields.admission_number,...exportedReferenceFields,...Object.fromEntries(updatable.map(k=>[k,studentFields[k]]))}).strict();
+export const bulkUpdate=z.object({dry_run:z.boolean().default(true),rows:z.array(z.record(z.string(),z.unknown())).min(1).max(200)}).strict();
+export const parseBulkRow=raw=>bulkRowSchema.safeParse(raw);
+
+export const promote=z.object({dry_run:z.boolean().default(true),to_academic_year_id:id,enrolled_on:date.optional(),moves:z.array(z.object({student_id:id,section_id:id}).strict()).min(1).max(200)}).strict();
