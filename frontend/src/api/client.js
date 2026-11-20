@@ -35,7 +35,8 @@ async function parseBody(response){
  //  - Render is waking the backend up (HTML "Application is starting up" page)
  //  - A proxy (Vercel, Cloudflare) returned an HTML error page
  //  - The request hit a path that fell through to the SPA index.html
- const snippet=await response.text().catch(()=>'').slice(0,120);
+ const text=await response.text().catch(()=>'');
+ const snippet=text.slice(0,120);
  const isHtml=snippet.toLowerCase().includes('<!doctype')||snippet.toLowerCase().includes('<html');
  const msg = isHtml && response.status>=500
    ? 'The backend is starting up after inactivity (Render free-tier sleep). Please wait a few seconds and try again.'
