@@ -1,0 +1,17 @@
+# QA test artifacts (large binaries — kept in repo for client delivery)
+# Reports, screenshots and diagrams are intentionally tracked.
+# If file sizes become a concern, move them to Git LFS or a release artifact.
+
+# Never commit:
+# - Real database connection strings (use env vars)
+# - Personal access tokens
+# - Database backup dumps containing user data
+# - .env files (already covered by root .gitignore)
+
+# Local QA runtime artifacts (regenerated per run)
+qa/scripts/run.log
+qa/scripts/api_results.json
+
+# Don't commit any local db_backup_*.sql files (contain user hashes)
+db_backup_*.sql
+**/db_backup_*.sql

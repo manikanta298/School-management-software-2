@@ -1,0 +1,904 @@
+{
+  "results": [
+    {
+      "module": "Auth",
+      "test_id": "AUTH-01",
+      "action": "Sign in with admin credentials",
+      "expected": "Dashboard loads with Overview nav visible",
+      "actual": "Logged in",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/00-login.png",
+      "notes": ""
+    },
+    {
+      "module": "Overview",
+      "test_id": "OVERVIEW-LOAD",
+      "action": "Open Overview module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Refresh insights', 'Open attendance', 'View full timetable', 'Explore results']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/01-overview.png",
+      "notes": ""
+    },
+    {
+      "module": "Overview",
+      "test_id": "OVR-01",
+      "action": "Click Refresh insights",
+      "expected": "Refreshes without error",
+      "actual": "Refreshed",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/overview-refresh.png",
+      "notes": ""
+    },
+    {
+      "module": "Overview",
+      "test_id": "OVR-02",
+      "action": "Verify demo dataset visible on dashboard",
+      "expected": "DEMO-prefixed counts visible",
+      "actual": "Visible",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/01-overview.png",
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STUDENTS-LOAD",
+      "action": "Open Students & parents module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Students', 'Parents', 'Search', 'Save profile']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/02-students.png",
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-01",
+      "action": "Click Edit profile on first student row",
+      "expected": "Profile edit form opens",
+      "actual": "Inputs=16",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/stu-01-edit-form.png",
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-02",
+      "action": "Save profile form submission",
+      "expected": "Save attempt completes",
+      "actual": "Completed",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/stu-02-save.png",
+      "notes": ""
+    },
+    {
+      "module": "Teachers",
+      "test_id": "TEACHERS-LOAD",
+      "action": "Open Teachers module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Search', 'Save profile', 'Assignments & rosters', 'Edit profile']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/03-teachers.png",
+      "notes": ""
+    },
+    {
+      "module": "Teachers",
+      "test_id": "TCH-01",
+      "action": "Verify DEMO teachers listed",
+      "expected": "DEMO teacher names visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/03-teachers.png",
+      "notes": ""
+    },
+    {
+      "module": "Staff",
+      "test_id": "STAFF-LOAD",
+      "action": "Open Staff module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Save staff member', 'Previous', 'Next']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/04-staff.png",
+      "notes": ""
+    },
+    {
+      "module": "Staff",
+      "test_id": "STF-01",
+      "action": "Verify Staff module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/04-staff.png",
+      "notes": ""
+    },
+    {
+      "module": "Transport",
+      "test_id": "TRANSPORT-LOAD",
+      "action": "Open Transport module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'vehicles', 'routes', 'allocations', 'Save vehicle']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/05-transport.png",
+      "notes": ""
+    },
+    {
+      "module": "Transport",
+      "test_id": "TRN-01",
+      "action": "Verify Transport module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/05-transport.png",
+      "notes": ""
+    },
+    {
+      "module": "Academic setup",
+      "test_id": "ACADEMIC-LOAD",
+      "action": "Open Academic setup module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Academic years', 'Terms', 'Classes', 'Sections']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/06-academic.png",
+      "notes": ""
+    },
+    {
+      "module": "Academic setup",
+      "test_id": "ACAD-01",
+      "action": "Verify academic setup shows DEMO year/terms/classes",
+      "expected": "DEMO academic records visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/06-academic.png",
+      "notes": ""
+    },
+    {
+      "module": "Attendance",
+      "test_id": "ATTENDANCE-LOAD",
+      "action": "Open Attendance module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Daily register', 'Section summary', 'Student history', 'Set unmarked rows present on this page']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/07-attendance.png",
+      "notes": ""
+    },
+    {
+      "module": "Attendance",
+      "test_id": "ATT-01",
+      "action": "Verify attendance register UI present",
+      "expected": "Daily register / Save edited rows visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/07-attendance.png",
+      "notes": ""
+    },
+    {
+      "module": "Timetable",
+      "test_id": "TIMETABLE-LOAD",
+      "action": "Open Timetable module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Weekly view', 'Manage sessions', 'Rooms', 'Previous week']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/08-timetable.png",
+      "notes": ""
+    },
+    {
+      "module": "Timetable",
+      "test_id": "TT-01",
+      "action": "Verify timetable shows DEMO sessions",
+      "expected": "DEMO timetable sessions visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/08-timetable.png",
+      "notes": ""
+    },
+    {
+      "module": "School calendar",
+      "test_id": "CALENDAR-LOAD",
+      "action": "Open School calendar module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Save entry']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/09-calendar.png",
+      "notes": ""
+    },
+    {
+      "module": "School calendar",
+      "test_id": "CAL-01",
+      "action": "Verify calendar renders with current month",
+      "expected": "Calendar grid with current month visible",
+      "actual": "Rendered",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/09-calendar.png",
+      "notes": ""
+    },
+    {
+      "module": "Homework",
+      "test_id": "HOMEWORK-LOAD",
+      "action": "Open Homework module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Save homework', 'Previous', 'Next']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/10-homework.png",
+      "notes": ""
+    },
+    {
+      "module": "Homework",
+      "test_id": "HW-01",
+      "action": "Verify Homework module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/10-homework.png",
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXAMS-LOAD",
+      "action": "Open Exams & results module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Exams', 'Grading scales', 'Create exam', 'Manage / view exam']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/11-exams.png",
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-01",
+      "action": "Verify DEMO exams listed",
+      "expected": "DEMO exams visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/11-exams.png",
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-02",
+      "action": "Open Create exam form",
+      "expected": "Form fields visible",
+      "actual": "Open",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/exm-02-create.png",
+      "notes": ""
+    },
+    {
+      "module": "Fees & invoices",
+      "test_id": "FEES-LOAD",
+      "action": "Open Fees & invoices module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Invoices', 'Balances', 'Fee structures', 'Reports']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/12-fees.png",
+      "notes": ""
+    },
+    {
+      "module": "Fees & invoices",
+      "test_id": "FEE-01",
+      "action": "Verify fee dashboard shows currency breakdown",
+      "expected": "INR/USD balances visible",
+      "actual": "Shown",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/12-fees.png",
+      "notes": ""
+    },
+    {
+      "module": "Fees & invoices",
+      "test_id": "FEE-02",
+      "action": "Open Issue invoice form",
+      "expected": "Form fields visible",
+      "actual": "Open",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/fee-02-collect.png",
+      "notes": ""
+    },
+    {
+      "module": "Notices",
+      "test_id": "NOTICES-LOAD",
+      "action": "Open Notices module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Visible notices', 'Manage all notices', 'Create draft', 'Search']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/13-notices.png",
+      "notes": ""
+    },
+    {
+      "module": "Notices",
+      "test_id": "NOT-01",
+      "action": "Verify DEMO notices listed",
+      "expected": "DEMO notices with state labels visible",
+      "actual": "Present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/13-notices.png",
+      "notes": ""
+    },
+    {
+      "module": "Notices",
+      "test_id": "NOT-02",
+      "action": "Open Create draft form",
+      "expected": "Form fields visible",
+      "actual": "Open",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/not-02-create.png",
+      "notes": ""
+    },
+    {
+      "module": "Certificates",
+      "test_id": "CERTIFICATES-LOAD",
+      "action": "Open Certificates module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Issue certificate']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/14-certificates.png",
+      "notes": ""
+    },
+    {
+      "module": "Certificates",
+      "test_id": "CRT-01",
+      "action": "Verify Certificates module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/14-certificates.png",
+      "notes": ""
+    },
+    {
+      "module": "Report cards",
+      "test_id": "REPORTCARDS-LOAD",
+      "action": "Open Report cards module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Open report card', 'Open report card', 'Open report card', 'Open report card']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/15-reportcards.png",
+      "notes": ""
+    },
+    {
+      "module": "Report cards",
+      "test_id": "RPC-01",
+      "action": "Verify Report cards module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/15-reportcards.png",
+      "notes": ""
+    },
+    {
+      "module": "Reports",
+      "test_id": "REPORTS-LOAD",
+      "action": "Open Reports module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Download CSV']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/16-reports.png",
+      "notes": ""
+    },
+    {
+      "module": "Reports",
+      "test_id": "RPT-01",
+      "action": "Verify Reports module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/16-reports.png",
+      "notes": ""
+    },
+    {
+      "module": "Leave",
+      "test_id": "LEAVE-LOAD",
+      "action": "Open Leave module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Requests', 'Staff balances', 'Submit request']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/17-leave.png",
+      "notes": ""
+    },
+    {
+      "module": "Leave",
+      "test_id": "LV-01",
+      "action": "Verify Leave module loads",
+      "expected": "Page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/17-leave.png",
+      "notes": ""
+    },
+    {
+      "module": "Settings",
+      "test_id": "SETTINGS-LOAD",
+      "action": "Open Settings module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Save profile', 'Upload logo', 'Save preferences', 'Enroll MFA']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/18-settings.png",
+      "notes": ""
+    },
+    {
+      "module": "Settings",
+      "test_id": "SET-01",
+      "action": "Verify Settings module loads with profile form",
+      "expected": "School profile form visible",
+      "actual": "Form present",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/18-settings.png",
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USERS-LOAD",
+      "action": "Open User accounts module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Create account', 'Force sign-out', 'Issue temporary password', 'Reset and revoke sessions']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/19-users.png",
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-01",
+      "action": "Verify User accounts module loads",
+      "expected": "User list visible with role labels",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/19-users.png",
+      "notes": ""
+    },
+    {
+      "module": "Security",
+      "test_id": "SECURITY-LOAD",
+      "action": "Open Security module",
+      "expected": "Module renders without HTTP/server error",
+      "actual": "Loaded; buttons: ['Sign out', 'Update password and sign out', 'Sign out', 'Revoke', 'Revoke']",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/20-security.png",
+      "notes": ""
+    },
+    {
+      "module": "Security",
+      "test_id": "SEC-01",
+      "action": "Verify Security module loads",
+      "expected": "Security activity page renders",
+      "actual": "Loaded",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/20-security.png",
+      "notes": ""
+    },
+    {
+      "module": "Auth",
+      "test_id": "AUTH-V01",
+      "action": "POST /api/auth/login with empty body",
+      "expected": "400 validation (or 429 rate-limited)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"email\":[\"Invalid input: expected string, received undefined\"],\"password\":[\"Invalid",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": "429 = rate limiter engaged (expected)"
+    },
+    {
+      "module": "Auth",
+      "test_id": "AUTH-V02",
+      "action": "POST /api/auth/login with malformed email",
+      "expected": "400 validation (or 429 rate-limited)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"email\":[\"Invalid email address\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": "429 = rate limiter engaged (expected)"
+    },
+    {
+      "module": "Dashboard",
+      "test_id": "DASH-V01",
+      "action": "GET /api/dashboard with forbidden role override query",
+      "expected": "400 (dashboard accepts no override)",
+      "actual": "400: {\"message\":\"Dashboard accepts no user/role override query\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V01",
+      "action": "POST /api/students missing required user_id",
+      "expected": "400 (user_id required)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"user_id\":[\"Invalid input: expected string, received undefined\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V02",
+      "action": "POST /api/students invalid admission_number (special chars)",
+      "expected": "400 (regex ^[A-Z0-9_-]{1,30}$)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"admission_number\":[\"Invalid string: must match pattern /^[A-Z0-9_-]{1,30}$/\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V03",
+      "action": "POST /api/students with malformed date (MM/DD/YYYY)",
+      "expected": "400 (date must be YYYY-MM-DD)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"admission_date\":[\"Invalid string: must match pattern /^\\\\d{4}-\\\\d{2}-\\\\d{2}$/\",\"In",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V04",
+      "action": "POST /api/students with date_of_birth > admission_date",
+      "expected": "400 (Birth date must be \u2264 admission)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"date_of_birth\":[\"Birth date must be on or before admission\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V05",
+      "action": "POST /api/students with non-numeric pin_code",
+      "expected": "400 (pin_code must be 6 digits)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"pin_code\":[\"Invalid string: must match pattern /^[0-9]{6}$/\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Students & parents",
+      "test_id": "STU-V06",
+      "action": "GET /api/students?limit=999 (above max 100)",
+      "expected": "400 (limit max 100)",
+      "actual": "400: {\"message\":\"Invalid query\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Academic setup",
+      "test_id": "ACAD-V01",
+      "action": "GET /api/academic/academic-years?limit=0 (below min 1)",
+      "expected": "400 (limit min 1)",
+      "actual": "400: {\"message\":\"Invalid query\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Fees & invoices",
+      "test_id": "FEE-V01",
+      "action": "GET /api/fees/summary",
+      "expected": "200 with currency-separated balances",
+      "actual": "200: {\"items\":[{\"currency\":\"INR\",\"invoice_count\":16,\"void_count\":0,\"billed_minor\":\"13600000\",\"paid_minor\":\"6375000\",\"outstand",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Fees & invoices",
+      "test_id": "FEE-V02",
+      "action": "GET /api/fees/invoices?limit=999",
+      "expected": "400 (limit max 100)",
+      "actual": "400: {\"message\":\"Invalid query\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Attendance",
+      "test_id": "ATT-V01",
+      "action": "GET /api/attendance/register without required params",
+      "expected": "400 (section_id, date required)",
+      "actual": "400: {\"message\":\"Invalid dates, range or pagination. Choose up to 366 inclusive days.\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Attendance",
+      "test_id": "ATT-V02",
+      "action": "GET /api/attendance/audit as admin",
+      "expected": "200 or 400 (admin can access; section may not exist)",
+      "actual": "400: {\"message\":\"Invalid dates, range or pagination. Choose up to 366 inclusive days.\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-V01",
+      "action": "GET /api/exams (list)",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[{\"id\":\"4027d7b1-66e2-4d46-99bb-be58b2133f95\",\"class_id\":\"50071cab-56ef-48a8-8af8-5ac3e3233dbe\",\"academic_year_",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-V02",
+      "action": "POST /api/exams with empty body",
+      "expected": "400 (validation error)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"class_id\":[\"Invalid input: expected string, received undefined\"],\"grading_scale_id",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-V03",
+      "action": "POST /api/exams with malformed UUIDs",
+      "expected": "400 (all *_id must be UUID)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"class_id\":[\"Invalid UUID\"],\"term_id\":[\"Invalid UUID\"],\"grading_scale_id\":[\"Invalid",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Exams & results",
+      "test_id": "EXM-V04",
+      "action": "POST /api/exams with end_date before start_date",
+      "expected": "400 (date range invalid)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"end_date\":[\"End must follow start\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Notices",
+      "test_id": "NOT-V01",
+      "action": "GET /api/notices",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[{\"id\":\"d51dfb63-663f-42c4-a724-3edacb562331\",\"title\":\"DEMO \u00b7 Parent\u2013teacher meeting\",\"body_preview\":\"DEMO CONT",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "School calendar",
+      "test_id": "CAL-V01",
+      "action": "GET /api/calendar",
+      "expected": "200 with events",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "School calendar",
+      "test_id": "CAL-V02",
+      "action": "POST /api/calendar with invalid event_type",
+      "expected": "400 (event_type enum)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"event_type\":[\"Invalid option: expected one of \\\"holiday\\\"|\\\"event\\\"|\\\"exam\\\"|\\\"mee",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "School calendar",
+      "test_id": "CAL-V03",
+      "action": "POST /api/calendar with ends_on before starts_on",
+      "expected": "400 (date range)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"ends_on\":[\"End date cannot precede the start date\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Settings",
+      "test_id": "SET-V01",
+      "action": "GET /api/settings/school",
+      "expected": "200 with profile",
+      "actual": "200: {\"item\":null}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Settings",
+      "test_id": "SET-V02",
+      "action": "PUT /api/settings/school with invalid phone",
+      "expected": "400 (phone regex)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"phone\":[\"Invalid string: must match pattern /^[+0-9() .-]{7,30}$/\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Demo",
+      "test_id": "DEMO-V01",
+      "action": "GET /api/demo (status)",
+      "expected": "200 with loaded:true",
+      "actual": "200: {\"loaded\":true}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Demo",
+      "test_id": "DEMO-V02",
+      "action": "POST /api/demo without confirmation marker",
+      "expected": "400 (confirmation required) or 429 (rate-limited)",
+      "actual": "400: {\"message\":\"Explicit demo-data confirmation required\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": "429 = rate limiter engaged (expected, since 3 attempts/hour is the limit)"
+    },
+    {
+      "module": "Demo",
+      "test_id": "DEMO-V03",
+      "action": "POST /api/demo with wrong confirmation marker",
+      "expected": "400 (marker must be LOAD_DEMO_DATA)",
+      "actual": "400: {\"message\":\"Explicit demo-data confirmation required\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Certificates",
+      "test_id": "CRT-V01",
+      "action": "GET /api/certificates",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Report cards",
+      "test_id": "RPC-V01",
+      "action": "GET /api/report-cards",
+      "expected": "200",
+      "actual": "200: {\"items\":[{\"id\":\"fa0fe7c8-442b-40ef-b75c-7a9dfa7790be\",\"admission_number\":\"DEMO-S010\",\"name\":\"Demo \u00b7 Aadhya Patel\",\"emai",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Transport",
+      "test_id": "TRN-V01",
+      "action": "GET /api/transport/vehicles",
+      "expected": "200 (may be empty)",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Leave",
+      "test_id": "LV-V01",
+      "action": "GET /api/leave",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Homework",
+      "test_id": "HW-V01",
+      "action": "GET /api/homework",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Staff",
+      "test_id": "STF-V01",
+      "action": "GET /api/staff",
+      "expected": "200 with items",
+      "actual": "200: {\"items\":[]}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Timetable",
+      "test_id": "TT-V01",
+      "action": "GET /api/timetable/slots",
+      "expected": "200 with sessions",
+      "actual": "200: {\"items\":[{\"id\":\"945aa88d-e630-488c-93ef-cee74ba5bfe6\",\"section_id\":\"eca3bf71-c6cf-441e-a212-87aeb3db901f\",\"class_id\":\"5",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-V01",
+      "action": "GET /api/users (admin list)",
+      "expected": "200 with users",
+      "actual": "200: {\"users\":[{\"id\":\"02189074-f95f-4b91-9310-72cf11e91f1b\",\"name\":\"Demo \u00b7 Ravi Nair\",\"email\":\"demo.parent6@example.invalid\",",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-V02",
+      "action": "POST /api/users with invalid email",
+      "expected": "400 (email validation)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"email\":[\"Invalid email address\"],\"password\":[\"Too small: expected string to have >",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-V03",
+      "action": "POST /api/users with password < 12 chars",
+      "expected": "400 (password min 12)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"password\":[\"Too small: expected string to have >=12 characters\"]}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-V04",
+      "action": "POST /api/users with invalid role",
+      "expected": "400 (role enum)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{\"role\":[\"Invalid option: expected one of \\\"admin\\\"|\\\"principal\\\"|\\\"accountant\\\"|\\\"r",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "General",
+      "test_id": "GEN-V01",
+      "action": "POST /api/students with null body",
+      "expected": "400 (body required)",
+      "actual": "400: {\"message\":\"Invalid input\",\"errors\":{}}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "General",
+      "test_id": "GEN-V02",
+      "action": "GET nonexistent endpoint",
+      "expected": "404 (not found)",
+      "actual": "404: {\"message\":\"Not found\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "User accounts",
+      "test_id": "USR-V05",
+      "action": "GET /api/users without authentication",
+      "expected": "401 (Authentication required)",
+      "actual": "401: {\"message\":\"Authentication required\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Dashboard",
+      "test_id": "DASH-V02",
+      "action": "GET /api/dashboard without authentication",
+      "expected": "401",
+      "actual": "401: {\"message\":\"Authentication required\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Demo",
+      "test_id": "DEMO-V04",
+      "action": "GET /api/demo without authentication",
+      "expected": "401",
+      "actual": "401: {\"message\":\"Authentication required\"}",
+      "status": "PASS",
+      "screenshot": null,
+      "notes": ""
+    },
+    {
+      "module": "Auth",
+      "test_id": "AUTH-02",
+      "action": "Sign out",
+      "expected": "Returns to login screen",
+      "actual": "Signed out",
+      "status": "PASS",
+      "screenshot": "qa-screenshots/99-logout.png",
+      "notes": ""
+    }
+  ]
+}
