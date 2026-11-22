@@ -100,3 +100,17 @@ Save and redeploy. Startup applies migrations, then creates this administrator i
 After bootstrap, remove all three ADMIN_* variables together from Render and redeploy. The database account remains. Partial or invalid bootstrap settings fail startup with a redacted error; no passwords are logged.
 
 If logs say the account already exists and login is still rejected, changing ADMIN_PASSWORD will not reset its password. Use another signed-in administrator's Manage users password-reset action, or ask the database/service owner to perform an authorized account recovery. Do not remove authentication checks or recreate the database.
+
+## Checking and resetting the database
+
+Run these from `backend/` (locally, or in the Render service Shell):
+
+```sh
+npm run check:env      # validates env settings, DB connection, migrations and data state; prints no secrets
+npm run db:reset -- --database=<db name> --yes-delete-all-data   # DESTRUCTIVE: drops all tables, re-runs migrations
+npm run seed:admin     # create the first administrator after a reset (needs ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_NAME)
+```
+
+`db:reset` refuses to run unless the confirmation flag is present and `--database` exactly matches the connected
+database name. When `NODE_ENV=production` it also requires `--allow-production`. Take a backup first; the reset
+cannot be undone. Keep `JWT_SECRET` fixed in the service Environment so tokens survive restarts.
